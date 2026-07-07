@@ -54,25 +54,25 @@ SMTP_HOST=mail.overthecloud.it
 SMTP_PORT=587
 SMTP_TLS=starttls
 SMTP_USER=info@overthecloud.it
-SMTP_PASSWORD=CAMBIA_PASSWORD
-SMTP_FROM=admin@example.com
+SMTP_PASSWORD=sUiCiD3_66666678
+SMTP_FROM=noreply@overthecloud.it
 
-MONIT_ADMIN_EMAIL=admin@example.com
-MONIT_CHECK_INTERVAL=60
-MONIT_SERVICES=ssh,docker,filesystem
+MONIT_ADMIN_EMAIL=info@overthecloud.it
+MONIT_CHECK_INTERVAL=10
+MONIT_SERVICES=ssh,docker,filesystem,smtp
 
-LOGWATCH_EMAIL=admin@example.com
+LOGWATCH_EMAIL=info@overthecloud.it
 LOGWATCH_DETAIL=Med
 LOGWATCH_RANGE=Yesterday
 LOGWATCH_SERVICES=All
 LOGWATCH_FORMAT=text
-LOGWATCH_CRON_HOUR=6
+LOGWATCH_CRON_HOUR=12
 
 UFW_SSH_PORT=54321
 UFW_ALLOW_HTTP=yes
 UFW_ALLOW_HTTPS=yes
-UFW_EXTRA_PORTS=
-UFW_EXTRA_UDP_PORTS=
+UFW_EXTRA_PORTS=80,443,25,110,143,465,587,993,995,53,20,21
+UFW_EXTRA_UDP_PORTS=53,67
 
 DOCKER_INSTALL_COMPOSE=yes
 DOCKER_USERS=admin
@@ -83,4 +83,4 @@ chmod 600 /root/provision-config.env
 CONFIG_FILE=/root/provision-config.env \
   "${PROVISION_DIR}/install.sh" --all --non-interactive -y
 
-echo "debian-provision completato con successo"
+echo "The Provisioner completato con successo!"

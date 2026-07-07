@@ -67,6 +67,100 @@ detect_interactive() {
   fi
 }
 
+BASE_DONE_MARKER="/etc/debian-provision/base.done"
+
+# Aggiornamento completo: update, upgrade, dist-upgrade, pulizia cache
+apt_update_system() {
+  info "Aggiornamento indice pacchetti..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+
+  info "Aggiornamento distribuzione e patch di sicurezza (full-upgrade)..."
+  apt-get -y -o Dpkg::Options::="--force-confdef" \
+    -o Dpkg::Options::="--force-confold" \
+    full-upgrade
+
+  info "Dist-upgrade per eventuali cambi di dipendenze..."
+  apt-get -y -o Dpkg::Options::="--force-confdef" \
+    -o Dpkg::Options::="--force-confold" \
+    dist-upgrade
+
+  info "Pulizia pacchetti obsoleti e cache apt..."
+  apt-get -y autoremove --purge
+  apt-get -y autoclean
+  apt-get -y clean
+}
+
+# Toolchain e utilità comuni su server Debian
+apt_install_base_packages() {
+  info "Installazione pacchetti base..."
+  apt-get -y install \
+    apt-transport-https \
+    ca-certificates \
+    curl \
+    gnupg \
+    lsb-release \
+    build-essential \
+    pkg-config \
+    wget \
+    vim \
+    nano \
+    less \
+    htop \
+    unzip \
+    zip \
+    bzip2 \
+    xz-utils \
+    jq \
+    git \
+    rsync \
+    cron \
+    sudo \
+    fail2ban \
+    unattended-upgrades \
+    apt-listchanges \
+    dnsutils \
+    tmux \
+    tree \
+    lsof \
+    psmisc \
+    software-properties-common \
+    bash-completion \
+    netcat-openbsd \
+    sysstat \
+    acl \
+    openssl
+}
+
+apt_configure_unattended_upgrades() {
+  if [[ ! -f /etc/apt/apt.conf.d/20auto-upgrades ]]; then
+    dpkg-reconfigure -plow unattended-upgrades || true
+  fi
+
+  cat > /etc/apt/apt.conf.d/50unattended-upgrades-local <<'EOF'
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+EOF
+
+  systemctl enable unattended-upgrades 2>/dev/null || true
+  systemctl restart unattended-upgrades 2>/dev/null || true
+}
+
+# Bootstrap completo sistema (usato da modules/00-base.sh e aws-user-data)
+apt_bootstrap_system() {
+  if [[ -f "$BASE_DONE_MARKER" ]]; then
+    info "Bootstrap base già eseguito (${BASE_DONE_MARKER}), skip."
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$BASE_DONE_MARKER")"
+  apt_update_system
+  apt_install_base_packages
+  apt_configure_unattended_upgrades
+  touch "$BASE_DONE_MARKER"
+}
+
 # Legge variabile da config/env o chiede all'utente
 # Uso: prompt_var NOME_VAR "Domanda" "default" [segreto]
 prompt_var() {

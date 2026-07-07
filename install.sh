@@ -43,7 +43,7 @@ ${BOLD}OPZIONI:${NC}
   -l, --list              Elenca moduli disponibili
 
 ${BOLD}MODULI DISPONIBILI:${NC}
-  base      Aggiornamento sistema + pacchetti essenziali
+  base      Update, upgrade, build-essential e utilità di sistema
   ufw       Firewall UFW
   smtp      Relay SMTP condiviso (msmtp) per email di sistema
   docker    Docker Engine (repo ufficiale)
