@@ -13,6 +13,10 @@ exec > >(tee /var/log/debian-provision-boot.log) 2>&1
 set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
+# --- CREDENZIALI BOOT (compila nello script incollato in Lightsail, non committare token reali) ---
+GIT_TOKEN=""                    # GitHub PAT read-only per repo privata
+# GIT_TOKEN="ghp_xxxxxxxxxxxx"
+
 # --- Attendi rete (bootstrap completo dopo il clone) ---
 for attempt in $(seq 1 30); do
   apt-get update -qq && break
@@ -23,19 +27,23 @@ done
 # Minimo necessario per clonare il repository
 apt-get install -y git ca-certificates
 
-# --- Scarica debian-provision (scegli una sorgente) ---
+# --- Scarica The Provisioner ---
 PROVISION_DIR="/opt/debian-provision"
-PROVISION_REPO="${PROVISION_REPO:-https://github.com/slash3rmast3r/the-provisioner.git}"
+PROVISION_REPO="https://github.com/slash3rmast3r/the-provisioner.git"
 
-# Opzione A: git clone
+clone_provisioner_repo() {
+  local dest="$1"
+  local repo_url="$PROVISION_REPO"
+  if [[ -n "${GIT_TOKEN}" ]]; then
+    repo_url="https://x-access-token:${GIT_TOKEN}@github.com/slash3rmast3r/the-provisioner.git"
+    echo "[$(date '+%F %T')] Clone repo privata con PAT"
+  fi
+  git clone --depth 1 "${repo_url}" "${dest}"
+}
+
 if [[ ! -f "${PROVISION_DIR}/install.sh" ]]; then
-  git clone --depth 1 "${PROVISION_REPO}" "${PROVISION_DIR}"
+  clone_provisioner_repo "${PROVISION_DIR}"
 fi
-
-# Opzione B: tarball da S3 (decommenta se preferisci)
-# apt-get install -y awscli
-# aws s3 cp s3://tuo-bucket/debian-provision.tar.gz /tmp/debian-provision.tar.gz
-# tar xzf /tmp/debian-provision.tar.gz -C /opt
 
 find "${PROVISION_DIR}" -name '*.sh' -exec sed -i 's/\r$//' {} +
 chmod +x "${PROVISION_DIR}/install.sh"
