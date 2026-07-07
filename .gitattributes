@@ -1,0 +1,3 @@
+# Forza LF per script shell (evita errore bash\r su Linux)
+*.sh text eol=lf
+*.env text eol=lf
