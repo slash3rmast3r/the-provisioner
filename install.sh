@@ -44,6 +44,8 @@ set -uo pipefail
 
 VERSION="1.6.0"
 PROVISIONER_AUTHOR="Carlo Savino"
+PROVISIONER_EMAIL="info@savinocarlo.it"
+PROVISIONER_WEBSITE="www.savinocarlo.it"
 PROVISIONER_NAME="The Provisioner"
 PROVISIONER_REPO="https://github.com/slash3rmast3r/the-provisioner"
 LOG_FILE="/var/log/debian-provision.log"
@@ -664,6 +666,7 @@ usage() {
   cat <<EOF
 ${BOLD}${PROVISIONER_NAME} v${VERSION}${NC}
 Singolo file — by ${PROVISIONER_AUTHOR}
+${PROVISIONER_EMAIL} — ${PROVISIONER_WEBSITE}
 ${PROVISIONER_REPO}
 
 ${BOLD}install.sh${NC} — debian-provision
@@ -1365,11 +1368,11 @@ module_timezone() {
 
   local tz="${SYSTEM_TIMEZONE:-}"
   if [[ -z "$tz" ]]; then
-    tz="$(timedatectl show -pTimezone --value 2>/dev/null || echo "Europe/Rome")"
     if [[ "$INTERACTIVE" == "yes" ]]; then
-      prompt_var SYSTEM_TIMEZONE "Timezone (IANA)" "$tz"
+      prompt_var SYSTEM_TIMEZONE "Timezone (IANA, es. Europe/Rome)" "Europe/Rome"
       tz="$SYSTEM_TIMEZONE"
     else
+      tz="Europe/Rome"
       SYSTEM_TIMEZONE="$tz"
     fi
   fi
@@ -1391,16 +1394,17 @@ module_proftpd() {
 
   if [[ "$INTERACTIVE" == "yes" ]]; then
     prompt_var PROFTPD_PORT "Porta FTP" "${PROFTPD_PORT:-21}"
-    prompt_var PROFTPD_USER "Utente UNIX per FTP (es. ftpuser)" "${PROFTPD_USER:-}"
+    prompt_var_force PROFTPD_USER "Utente UNIX per FTP" "${PROFTPD_USER:-ftpuser}"
     prompt_yes_no PROFTPD_TLS "Abilitare TLS (FTPS esplicito)?" "${PROFTPD_TLS:-yes}"
     prompt_var PROFTPD_PASSIVE_MIN "Porta passive min" "${PROFTPD_PASSIVE_MIN:-40000}"
     prompt_var PROFTPD_PASSIVE_MAX "Porta passive max" "${PROFTPD_PASSIVE_MAX:-40100}"
     prompt_yes_no PROFTPD_ALLOW_ANONYMOUS "Consentire FTP anonimo?" "no"
   else
     is_yes "${PROFTPD_TLS:-auto}" && PROFTPD_TLS=yes || true
+    [[ -n "$PROFTPD_USER" ]] || PROFTPD_USER="ftpuser"
   fi
 
-  [[ -n "$PROFTPD_USER" ]] || die "PROFTPD_USER obbligatorio"
+  [[ -n "$PROFTPD_USER" ]] || PROFTPD_USER="ftpuser"
   id "$PROFTPD_USER" &>/dev/null || useradd -m -s /usr/sbin/nologin "$PROFTPD_USER"
 
   local tls_lines=""
@@ -1656,6 +1660,7 @@ build_install_report_body() {
   cat <<EOF
 Report provisioning ${PROVISIONER_NAME} v${VERSION}
 by ${PROVISIONER_AUTHOR}
+${PROVISIONER_EMAIL} — ${PROVISIONER_WEBSITE}
 ${PROVISIONER_REPO}
 ==========================================
 
@@ -1733,7 +1738,9 @@ EOF
 
   echo
   echo "--"
-  echo "${PROVISIONER_NAME} by ${PROVISIONER_AUTHOR} — ${PROVISIONER_REPO}"
+  echo "${PROVISIONER_NAME} by ${PROVISIONER_AUTHOR}"
+  echo "${PROVISIONER_EMAIL} — ${PROVISIONER_WEBSITE}"
+  echo "${PROVISIONER_REPO}"
   echo "Copyright (c) Carlo Savino — BSD 3-Clause License"
   echo "Generato automaticamente da install.sh"
 }
@@ -2124,6 +2131,7 @@ show_banner() {
   echo -e "${BOLD}╔══════════════════════════════════════════════════╗${NC}"
   printf "${BOLD}║  %-48s║${NC}\n" "${PROVISIONER_NAME} v${VERSION}"
   printf "${BOLD}║  %-48s║${NC}\n" "by ${PROVISIONER_AUTHOR}"
+  printf "${BOLD}║  %-48s║${NC}\n" "${PROVISIONER_EMAIL} — ${PROVISIONER_WEBSITE}"
   printf "${BOLD}║  %-48s║${NC}\n" "Debian provisioning — single file"
   if [[ -n "${DEBIAN_CODENAME:-}" ]]; then
     printf "${BOLD}║  %-48s║${NC}\n" "${DEBIAN_PRETTY} (${DEBIAN_CODENAME})"
