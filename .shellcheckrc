@@ -1,0 +1,4 @@
+# The Provisioner — ShellCheck defaults
+external-sources=true
+# Dynamic var refs and intentional unused vars in large provisioning script
+disable=SC2034,SC2154

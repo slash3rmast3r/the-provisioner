@@ -36,13 +36,13 @@ if grep -q $'\r' "$0" 2>/dev/null; then
   sed -i 's/\r$//' "$0"
   exec /usr/bin/env bash "$0" "$@"
 fi
-echo "[install.sh] debian-provision v1.5.0 — avvio..." >&2
+echo "[install.sh] debian-provision v1.6.0 — avvio..." >&2
 
 # Nota: NON usare set -e — con pattern [[ cond ]] && cmd le funzioni
 # restituiscono exit 1 quando la condizione è falsa e lo script termina in silenzio.
 set -uo pipefail
 
-VERSION="1.5.0"
+VERSION="1.6.0"
 PROVISIONER_AUTHOR="Carlo Savino"
 PROVISIONER_NAME="The Provisioner"
 PROVISIONER_REPO="https://github.com/slash3rmast3r/the-provisioner"
@@ -63,6 +63,13 @@ INTERACTIVE="${INTERACTIVE:-auto}"
 SKIP_CONFIRM=false
 NON_INTERACTIVE=false
 ALLOW_REBOOT="${ALLOW_REBOOT:-${REBOOT_AFTER_INSTALL:-auto}}"
+ONLY_MODULES=""
+SKIP_BASE=false
+MODULE_FORCE="${MODULE_FORCE:-no}"
+CONFIG_FILE="${CONFIG_FILE:-}"
+PREFLIGHT_STRICT="${PREFLIGHT_STRICT:-yes}"
+CLOUD_PROVIDER="${CLOUD_PROVIDER:-auto}"
+SSH_PREFLIGHT_CONFIRMED="${SSH_PREFLIGHT_CONFIRMED:-no}"
 
 # Selezione componenti (yes/no/auto — auto = chiedi in interattivo)
 INSTALL_BASE="${INSTALL_BASE:-yes}"
@@ -78,6 +85,10 @@ INSTALL_RAM_MONITOR="${INSTALL_RAM_MONITOR:-auto}"
 INSTALL_SMART_MONITOR="${INSTALL_SMART_MONITOR:-auto}"
 INSTALL_BOOT_SERVICES="${INSTALL_BOOT_SERVICES:-auto}"
 INSTALL_BASHRC_ALIASES="${INSTALL_BASHRC_ALIASES:-auto}"
+INSTALL_FAIL2BAN="${INSTALL_FAIL2BAN:-auto}"
+INSTALL_SSH_HARDENING="${INSTALL_SSH_HARDENING:-auto}"
+INSTALL_TIMEZONE="${INSTALL_TIMEZONE:-auto}"
+INSTALL_PROFTPD="${INSTALL_PROFTPD:-auto}"
 
 # Variabili configurazione (sovrascrivibili via env)
 SMTP_HOST="${SMTP_HOST:-}"
@@ -85,6 +96,7 @@ SMTP_PORT="${SMTP_PORT:-587}"
 SMTP_TLS="${SMTP_TLS:-starttls}"
 SMTP_USER="${SMTP_USER:-}"
 SMTP_PASSWORD="${SMTP_PASSWORD:-}"
+SMTP_PASSWORD_FILE="${SMTP_PASSWORD_FILE:-}"
 POSTFIX_MAILNAME="${POSTFIX_MAILNAME:-}"
 POSTFIX_MYORIGIN="${POSTFIX_MYORIGIN:-}"
 POSTFIX_LOOPBACK="${POSTFIX_LOOPBACK:-auto}"
@@ -98,11 +110,11 @@ DOCKER_INSTALL_COMPOSE="${DOCKER_INSTALL_COMPOSE:-auto}"
 DOCKER_USERS="${DOCKER_USERS:-}"
 MONIT_ADMIN_EMAIL="${MONIT_ADMIN_EMAIL:-}"
 MONIT_CHECK_INTERVAL="${MONIT_CHECK_INTERVAL:-60}"
-MONIT_SERVICES="${MONIT_SERVICES:-ssh,docker,filesystem}"
+MONIT_SERVICES="${MONIT_SERVICES:-auto}"
 LOGWATCH_EMAIL="${LOGWATCH_EMAIL:-}"
 LOGWATCH_DETAIL="${LOGWATCH_DETAIL:-Med}"
 LOGWATCH_RANGE="${LOGWATCH_RANGE:-Yesterday}"
-LOGWATCH_SERVICES="${LOGWATCH_SERVICES:-All}"
+LOGWATCH_SERVICES="${LOGWATCH_SERVICES:-auto}"
 LOGWATCH_FORMAT="${LOGWATCH_FORMAT:-text}"
 LOGWATCH_CRON_HOUR="${LOGWATCH_CRON_HOUR:-6}"
 
@@ -119,6 +131,23 @@ SMART_TELEGRAM_CHAT_ID="${SMART_TELEGRAM_CHAT_ID:-}"
 SMART_GOTIFY_URL="${SMART_GOTIFY_URL:-}"
 SMART_GOTIFY_TOKEN="${SMART_GOTIFY_TOKEN:-}"
 SMART_CRON_HOUR="${SMART_CRON_HOUR:-6}"
+
+# SSH hardening
+SSH_PERMIT_ROOT="${SSH_PERMIT_ROOT:-prohibit-password}"
+SSH_PASSWORD_AUTH="${SSH_PASSWORD_AUTH:-yes}"
+SSH_MAX_AUTH_TRIES="${SSH_MAX_AUTH_TRIES:-5}"
+SSH_ALLOW_USERS="${SSH_ALLOW_USERS:-}"
+
+# Timezone
+SYSTEM_TIMEZONE="${SYSTEM_TIMEZONE:-}"
+
+# ProFTPd
+PROFTPD_PORT="${PROFTPD_PORT:-21}"
+PROFTPD_TLS="${PROFTPD_TLS:-auto}"
+PROFTPD_PASSIVE_MIN="${PROFTPD_PASSIVE_MIN:-40000}"
+PROFTPD_PASSIVE_MAX="${PROFTPD_PASSIVE_MAX:-40100}"
+PROFTPD_USER="${PROFTPD_USER:-}"
+PROFTPD_ALLOW_ANONYMOUS="${PROFTPD_ALLOW_ANONYMOUS:-no}"
 
 # Report email finale provisioning
 SEND_INSTALL_REPORT="${SEND_INSTALL_REPORT:-auto}"
@@ -380,6 +409,207 @@ is_yes() {
   [[ "${1,,}" == "yes" || "${1,,}" == "y" || "$1" == "1" ]]
 }
 
+list_contains() {
+  local list="$1" item="$2" x
+  IFS=',' read -ra _lc_arr <<< "$list"
+  for x in "${_lc_arr[@]}"; do
+    x="$(echo "$x" | tr '[:upper:]' '[:lower:]' | xargs)"
+    [[ "$x" == "${item,,}" ]] && return 0
+  done
+  return 1
+}
+
+module_marker_path() {
+  echo "${MARKER_DIR}/${1}.done"
+}
+
+is_module_done() {
+  [[ -f "$(module_marker_path "$1")" ]]
+}
+
+mark_module_done() {
+  date -Iseconds > "$(module_marker_path "$1")"
+}
+
+should_run_module() {
+  local mod="$1" var="$2"
+  if [[ -n "$ONLY_MODULES" ]]; then
+    list_contains "$ONLY_MODULES" "$mod" || return 1
+  else
+    is_yes "${!var}" || return 1
+  fi
+  if is_module_done "$mod" && ! is_yes "$MODULE_FORCE"; then
+    info "Modulo '${mod}' già completato — skip (MODULE_FORCE=yes per forzare)"
+    return 1
+  fi
+  return 0
+}
+
+load_config_file() {
+  [[ -n "$CONFIG_FILE" ]] || return 0
+  [[ -f "$CONFIG_FILE" ]] || die "CONFIG_FILE non trovato: ${CONFIG_FILE}"
+  info "Caricamento config: ${CONFIG_FILE}"
+  set -a
+  # shellcheck source=/dev/null
+  source "$CONFIG_FILE"
+  set +a
+}
+
+load_smtp_password() {
+  if [[ -n "${SMTP_PASSWORD_FILE:-}" && -f "$SMTP_PASSWORD_FILE" ]]; then
+    SMTP_PASSWORD="$(tr -d '\n\r' < "$SMTP_PASSWORD_FILE")"
+    info "Password SMTP letta da ${SMTP_PASSWORD_FILE}"
+  fi
+}
+
+write_postfix_sasl_passwd() {
+  local relayhost="$1" user="$2" pass="$3"
+  install -m 600 -o root -g root /dev/null /etc/postfix/sasl_passwd
+  printf '%s\t%s:%s\n' "$relayhost" "$user" "$pass" > /etc/postfix/sasl_passwd
+  postmap /etc/postfix/sasl_passwd || die "postmap sasl_passwd fallito — verifica password/caratteri speciali"
+  chmod 600 /etc/postfix/sasl_passwd /etc/postfix/sasl_passwd.db 2>/dev/null || true
+}
+
+preflight_checks() {
+  info "━━━ Preflight ${PROVISIONER_NAME} ━━━"
+  local ok=true
+
+  local free_root free_var
+  free_root="$(df -Pm / 2>/dev/null | awk 'NR==2{print $4}')"
+  free_var="$(df -Pm /var 2>/dev/null | awk 'NR==2{print $4}')"
+  if [[ "${free_root:-0}" -lt 256 ]]; then
+    is_yes "$PREFLIGHT_STRICT" && die "Spazio insufficiente su / (${free_root:-?} MB liberi, min 256 MB)" \
+      || { warn "Spazio basso su / (${free_root:-?} MB)"; ok=false; }
+  elif [[ "${free_root:-0}" -lt 2048 ]]; then
+    warn "Spazio su / limitato (${free_root} MB liberi) — consigliati ≥ 2 GB"
+  fi
+  [[ -n "${free_var:-}" && "${free_var:-0}" -lt 256 ]] && \
+    warn "Spazio basso su /var (${free_var} MB liberi)"
+
+  local mem_kb
+  mem_kb="$(grep '^MemTotal:' /proc/meminfo 2>/dev/null | awk '{print $2}')"
+  if [[ "${mem_kb:-0}" -lt 262144 ]]; then
+    is_yes "$PREFLIGHT_STRICT" && die "RAM insufficiente (< 256 MB)" \
+      || { warn "RAM molto bassa (${mem_kb} kB)"; ok=false; }
+  elif [[ "${mem_kb:-0}" -lt 524288 ]]; then
+    warn "RAM limitata (< 512 MB) — VPS minima"
+  fi
+
+  if ! getent hosts deb.debian.org >/dev/null 2>&1; then
+    is_yes "$PREFLIGHT_STRICT" && die "DNS/rete non disponibile (deb.debian.org)" \
+      || { warn "Risoluzione DNS deb.debian.org fallita"; ok=false; }
+  fi
+
+  if [[ ! -d /run/systemd/system ]] && ! pidof systemd >/dev/null 2>&1; then
+    warn "systemd non rilevato — alcuni moduli (ssh.socket, servizi) potrebbero non funzionare"
+    ok=false
+  fi
+
+  if [[ -n "${SSH_CONNECTION:-}" ]] && is_yes "$INSTALL_UFW"; then
+    warn "Sessione SSH attiva: cambio porta/firewall può disconnetterti — apri ${UFW_SSH_PORT} nel cloud prima del reboot"
+  fi
+
+  if [[ "$ok" == true ]]; then
+    success "Preflight OK"
+  else
+    warn "Preflight completato con avvisi"
+  fi
+}
+
+build_monit_services() {
+  local list=()
+  is_yes "$INSTALL_UFW"        && list+=("ssh")
+  is_yes "$INSTALL_DOCKER"     && list+=("docker")
+  is_yes "$INSTALL_SMTP"       && list+=("postfix")
+  is_yes "$INSTALL_PROFTPD"    && list+=("proftpd")
+  list+=("filesystem")
+  (IFS=','; echo "${list[*]}")
+}
+
+build_logwatch_services() {
+  local list=("sshd")
+  is_yes "$INSTALL_SMTP"     && list+=("postfix")
+  is_yes "$INSTALL_FAIL2BAN" && list+=("fail2ban")
+  is_yes "$INSTALL_MONIT"    && list+=("monit")
+  is_yes "$INSTALL_PROFTPD"  && list+=("proftpd")
+  is_yes "$INSTALL_DOCKER"   && list+=("docker")
+  (IFS=','; echo "${list[*]}")
+}
+
+resolve_monit_services() {
+  if [[ "${MONIT_SERVICES,,}" == "auto" || -z "$MONIT_SERVICES" ]]; then
+    MONIT_SERVICES="$(build_monit_services)"
+    info "Monit servizi (auto): ${MONIT_SERVICES}"
+  fi
+}
+
+resolve_logwatch_services() {
+  if [[ "${LOGWATCH_SERVICES,,}" == "auto" || -z "$LOGWATCH_SERVICES" ]]; then
+    LOGWATCH_SERVICES="$(build_logwatch_services)"
+    info "Logwatch servizi (auto): ${LOGWATCH_SERVICES}"
+  fi
+}
+
+cloud_firewall_reminder() {
+  local ports="TCP/${UFW_SSH_PORT} (SSH)"
+  is_yes "$INSTALL_UFW" && is_yes "$UFW_ALLOW_HTTP"  && ports+=", TCP/80"
+  is_yes "$INSTALL_UFW" && is_yes "$UFW_ALLOW_HTTPS" && ports+=", TCP/443"
+  is_yes "$INSTALL_PROFTPD" && ports+=", TCP/${PROFTPD_PORT}, TCP/${PROFTPD_PASSIVE_MIN}-${PROFTPD_PASSIVE_MAX} (FTP passive)"
+  echo
+  warn "════════════════════════════════════════════════════════════"
+  warn "  FIREWALL CLOUD — apri le stesse porte del server:"
+  warn "  ${ports}"
+  case "${CLOUD_PROVIDER,,}" in
+    aws|ec2)
+      warn "  AWS: EC2 → Security Group → Inbound rules"
+      ;;
+    lightsail)
+      warn "  Lightsail: Networking → Firewall → Add rule (TCP ${UFW_SSH_PORT})"
+      ;;
+    hetzner)
+      warn "  Hetzner Cloud: Firewall → Inbound → TCP ${UFW_SSH_PORT}"
+      ;;
+    ovh)
+      warn "  OVH: Network → IP → Firewall"
+      ;;
+    *)
+      warn "  Provider: ${CLOUD_PROVIDER:-generico} — pannello firewall/security group"
+      ;;
+  esac
+  warn "════════════════════════════════════════════════════════════"
+  echo
+}
+
+prompt_ssh_connectivity_check() {
+  is_yes "$INSTALL_UFW" || return 0
+  local ip user cmd
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  user="${SSH_ALLOW_USERS:-root}"
+  user="${user%%,*}"
+  cmd="ssh -p ${UFW_SSH_PORT} ${user}@${ip:-<ip-server>}"
+  echo
+  warn "════════════════════════════════════════════════════════════"
+  warn "  TEST SSH — apri una SECONDA sessione prima del reboot:"
+  warn "  ${cmd}"
+  warn "════════════════════════════════════════════════════════════"
+  echo
+  if nc -z 127.0.0.1 "$UFW_SSH_PORT" 2>/dev/null; then
+    success "Porta ${UFW_SSH_PORT} in ascolto su localhost"
+  else
+    warn "Porta ${UFW_SSH_PORT} non raggiungibile su localhost"
+  fi
+  if [[ "$INTERACTIVE" == "yes" ]]; then
+    if confirm "Hai verificato l'accesso SSH su una seconda sessione?" "n"; then
+      SSH_PREFLIGHT_CONFIRMED=yes
+    else
+      SSH_PREFLIGHT_CONFIRMED=no
+      warn "Accesso SSH non confermato — il reboot verrà bloccato in modalità interattiva"
+    fi
+  elif ! is_yes "$SSH_PREFLIGHT_CONFIRMED"; then
+    warn "SSH_PREFLIGHT_CONFIRMED=no — reboot sconsigliato finché non testi SSH"
+  fi
+}
+
 # Estrae blocco tra marker dal file install.sh (script embedded)
 write_embedded_file() {
   local marker_start="$1" marker_end="$2" dest="$3" perm="${4:-755}"
@@ -410,6 +640,11 @@ save_runtime_config() {
     echo "INSTALL_DOCKER=${INSTALL_DOCKER}"
     echo "INSTALL_MONIT=${INSTALL_MONIT}"
     echo "INSTALL_LOGWATCH=${INSTALL_LOGWATCH}"
+    echo "INSTALL_FAIL2BAN=${INSTALL_FAIL2BAN}"
+    echo "INSTALL_SSH_HARDENING=${INSTALL_SSH_HARDENING}"
+    echo "INSTALL_TIMEZONE=${INSTALL_TIMEZONE}"
+    echo "INSTALL_PROFTPD=${INSTALL_PROFTPD}"
+    echo "SYSTEM_TIMEZONE=${SYSTEM_TIMEZONE:-$(timedatectl show -pTimezone --value 2>/dev/null)}"
     echo "SMTP_HOST=${SMTP_HOST}"
     echo "SMTP_PORT=${SMTP_PORT}"
     echo "SMTP_TLS=${SMTP_TLS}"
@@ -441,17 +676,28 @@ ${BOLD}OPZIONI:${NC}
   -h, --help              Aiuto
   -n, --non-interactive   Nessun prompt (usa env / default)
   -y, --yes               Salta conferma finale
+  --only LIST             Solo moduli (es. ufw,smtp,monit,docker,proftpd)
+  --skip base             Salta aggiornamento apt base
+
+${BOLD}MODULI (--only):${NC}
+  base, build, smtp, ufw, ssh_hardening, fail2ban, docker, timezone,
+  proftpd, cron, monit, logwatch, ram_monitor, smart_monitor, boot_services
 
 ${BOLD}VARIABILI (esempio):${NC}
+  CONFIG_FILE, MODULE_FORCE, PREFLIGHT_STRICT, CLOUD_PROVIDER
   INSTALL_BUILD, INSTALL_UFW, INSTALL_SMTP, INSTALL_DOCKER,
-  INSTALL_MONIT, INSTALL_LOGWATCH  (yes/no/auto)
-  SMTP_HOST, SMTP_PORT, SMTP_TLS, SMTP_USER, SMTP_PASSWORD, SMTP_FROM
-  POSTFIX_MAILNAME, POSTFIX_LOOPBACK
+  INSTALL_MONIT, INSTALL_LOGWATCH, INSTALL_FAIL2BAN, INSTALL_SSH_HARDENING,
+  INSTALL_TIMEZONE, INSTALL_PROFTPD  (yes/no/auto)
+  SMTP_HOST, SMTP_PORT, SMTP_TLS, SMTP_USER, SMTP_PASSWORD, SMTP_PASSWORD_FILE
+  SMTP_FROM, POSTFIX_MAILNAME, POSTFIX_LOOPBACK
   UFW_SSH_PORT, UFW_ALLOW_HTTP, UFW_ALLOW_HTTPS, UFW_EXTRA_PORTS, UFW_RULES_FILE
   MONIT_ADMIN_EMAIL, LOGWATCH_EMAIL, DOCKER_USERS
+  SYSTEM_TIMEZONE, SSH_PERMIT_ROOT, SSH_PASSWORD_AUTH, SSH_ALLOW_USERS
+  PROFTPD_PORT, PROFTPD_TLS, PROFTPD_USER, PROFTPD_PASSIVE_MIN, PROFTPD_PASSIVE_MAX
   ALLOW_REBOOT (yes/no/auto) — riavvio a fine provisioning
   SEND_INSTALL_REPORT (yes/no/auto) — email report finale (default: auto)
   INSTALL_REPORT_EMAIL — destinatario report (default: Monit/Logwatch/SMTP_FROM)
+  SSH_PREFLIGHT_CONFIRMED (yes/no) — conferma test SSH pre-reboot
   DEBIAN_ALLOW_OLD (yes/no) — consente Debian < ${DEBIAN_MIN_MAJOR} (default: no)
 
 ${BOLD}DEBIAN SUPPORTATO:${NC}
@@ -467,9 +713,20 @@ parse_args() {
       -h|--help) usage; exit 0 ;;
       -n|--non-interactive) NON_INTERACTIVE=true; INTERACTIVE="no"; shift ;;
       -y|--yes) SKIP_CONFIRM=true; shift ;;
+      --only)
+        [[ $# -ge 2 ]] || die "Uso: --only ufw,smtp,monit,..."
+        ONLY_MODULES="$(echo "$2" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
+        shift 2
+        ;;
+      --skip)
+        [[ $# -ge 2 ]] || die "Uso: --skip base"
+        [[ "${2,,}" == "base" ]] && SKIP_BASE=true
+        shift 2
+        ;;
       *) die "Opzione sconosciuta: $1" ;;
     esac
   done
+  load_config_file
 }
 
 # ─── APT / sistema base ───────────────────────────────────────────────────────
@@ -521,23 +778,33 @@ EOF
 
 module_base() {
   mkdir -p "$MARKER_DIR"
-  # Aggiornamento apt sempre ad ogni esecuzione (come richiesto)
+  if is_yes "$SKIP_BASE"; then
+    info "Skip aggiornamento base (--skip base)"
+    return 0
+  fi
+  if [[ -n "$ONLY_MODULES" ]] && ! list_contains "$ONLY_MODULES" "base"; then
+    return 0
+  fi
+
   apt_update_system
 
-  if [[ -f "$BASE_DONE_MARKER" ]]; then
-    info "Pacchetti base già installati (${BASE_DONE_MARKER}), skip reinstall."
+  if is_module_done "base" && ! is_yes "$MODULE_FORCE"; then
+    info "Pacchetti base già installati — skip reinstall (MODULE_FORCE=yes per forzare)."
     return 0
   fi
 
   apt_install_core_packages
   apt_configure_unattended_upgrades
   date -Iseconds > "$BASE_DONE_MARKER"
+  mark_module_done "base"
   success "Sistema aggiornato e pacchetti base installati."
 }
 
 module_build_essential() {
+  should_run_module "build" "INSTALL_BUILD" || return 0
   info "Installazione build-essential (gcc, make, ...)..."
   apt-get -y install build-essential pkg-config
+  mark_module_done "build"
   success "build-essential installato."
 }
 
@@ -553,6 +820,7 @@ smtp_is_configured() {
 
 prompt_smtp_config() {
   info "Configurazione Postfix relay verso smarthost esistente..."
+  load_smtp_password
   prompt_var SMTP_HOST          "Server SMTP smarthost (hostname)" "$SMTP_HOST"
   prompt_var SMTP_PORT          "Porta (587=STARTTLS, 465=SSL)"    "${SMTP_PORT:-587}"
   prompt_var SMTP_TLS           "Crittografia (starttls, ssl, none)" "${SMTP_TLS:-starttls}"
@@ -572,11 +840,12 @@ prompt_smtp_config() {
 
 configure_postfix() {
   smtp_is_enabled || return 0
-  if smtp_is_configured; then
+  if smtp_is_configured && ! is_yes "$MODULE_FORCE"; then
     info "Postfix già configurato, skip."
     return 0
   fi
 
+  load_smtp_password
   info "Installazione e configurazione Postfix (relay smarthost)..."
   export DEBIAN_FRONTEND=noninteractive
 
@@ -618,11 +887,7 @@ EOF
   postconf -e "myorigin = ${myorigin}"
   postconf -e "sender_canonical_maps = hash:/etc/postfix/sender_canonical"
 
-  cat > /etc/postfix/sasl_passwd <<EOF
-${relayhost}    ${SMTP_USER}:${SMTP_PASSWORD}
-EOF
-  chmod 600 /etc/postfix/sasl_passwd
-  postmap /etc/postfix/sasl_passwd
+  write_postfix_sasl_passwd "$relayhost" "$SMTP_USER" "$SMTP_PASSWORD"
 
   cat > /etc/postfix/sender_canonical <<EOF
 @${mailname}    ${SMTP_FROM}
@@ -636,6 +901,7 @@ EOF
   systemctl restart postfix
 
   date -Iseconds > "$SMTP_MARKER"
+  mark_module_done "smtp"
   success "Postfix relay → ${relayhost} (From: ${SMTP_FROM})"
   unset SMTP_PASSWORD
 }
@@ -679,6 +945,7 @@ smtp_send_test() {
 }
 
 module_smtp() {
+  should_run_module "smtp" "INSTALL_SMTP" || return 0
   prompt_smtp_config
   configure_postfix
   if [[ "$INTERACTIVE" == "yes" ]] && confirm "Inviare email di test?" "n"; then
@@ -806,20 +1073,6 @@ EOF
   fi
 
   warn_ssh_nonstandard_port "$port"
-
-  if command -v fail2ban-client &>/dev/null; then
-    mkdir -p /etc/fail2ban/jail.d
-    cat > /etc/fail2ban/jail.d/debian-provision.local <<EOF
-[sshd]
-enabled = true
-port = ${port}
-maxretry = 5
-bantime = 3600
-findtime = 600
-EOF
-    systemctl enable fail2ban 2>/dev/null || true
-    systemctl restart fail2ban 2>/dev/null || true
-  fi
 }
 
 verify_ssh_ufw_alignment() {
@@ -992,6 +1245,7 @@ ufw_import_custom_rules() {
 }
 
 module_ufw() {
+  should_run_module "ufw" "INSTALL_UFW" || return 0
   apt-get -y install ufw
 
   prompt_var UFW_SSH_PORT "Porta SSH" "${UFW_SSH_PORT}"
@@ -1025,6 +1279,168 @@ module_ufw() {
   else
     warn "UFW configurato ma non abilitato. Esegui: ufw enable"
   fi
+
+  mark_module_done "ufw"
+  cloud_firewall_reminder
+}
+
+# ─── SSH hardening ────────────────────────────────────────────────────────────
+
+module_ssh_hardening() {
+  should_run_module "ssh_hardening" "INSTALL_SSH_HARDENING" || return 0
+
+  if [[ "$INTERACTIVE" == "yes" ]]; then
+    prompt_var SSH_PERMIT_ROOT "PermitRootLogin (no, prohibit-password, yes)" "${SSH_PERMIT_ROOT:-prohibit-password}"
+    prompt_yes_no SSH_PASSWORD_AUTH "Consentire autenticazione password?" "${SSH_PASSWORD_AUTH:-yes}"
+    prompt_var SSH_MAX_AUTH_TRIES "MaxAuthTries" "${SSH_MAX_AUTH_TRIES:-5}"
+    read -rp "AllowUsers (virgola, Invio=nessuno): " SSH_ALLOW_USERS
+  fi
+
+  if ! is_yes "$SSH_PASSWORD_AUTH"; then
+    local u keyok=false
+    for u in root ${SSH_ALLOW_USERS//,/ }; do
+      u="$(echo "$u" | xargs)"
+      [[ -z "$u" ]] && continue
+      [[ -f "/home/${u}/.ssh/authorized_keys" || -f "/root/.ssh/authorized_keys" ]] && keyok=true
+      [[ "$u" == "root" && -f /root/.ssh/authorized_keys ]] && keyok=true
+    done
+    [[ -f /root/.ssh/authorized_keys ]] && keyok=true
+    [[ "$keyok" == true ]] || die "PasswordAuthentication=no richiede chiavi SSH in authorized_keys"
+  fi
+
+  mkdir -p /etc/ssh/sshd_config.d
+  cat > /etc/ssh/sshd_config.d/99-debian-provision-hardening.conf <<EOF
+# The Provisioner — Copyright (c) Carlo Savino — BSD-3-Clause
+PermitRootLogin ${SSH_PERMIT_ROOT}
+PasswordAuthentication $(is_yes "$SSH_PASSWORD_AUTH" && echo yes || echo no)
+MaxAuthTries ${SSH_MAX_AUTH_TRIES}
+EOF
+  if [[ -n "$SSH_ALLOW_USERS" ]]; then
+    echo "AllowUsers ${SSH_ALLOW_USERS//,/ }" >> /etc/ssh/sshd_config.d/99-debian-provision-hardening.conf
+  fi
+
+  sshd -t || die "Config SSH hardening non valida"
+  restart_sshd_service || die "Reload sshd fallito dopo hardening"
+  mark_module_done "ssh_hardening"
+  success "SSH hardening applicato → /etc/ssh/sshd_config.d/99-debian-provision-hardening.conf"
+}
+
+# ─── Fail2ban ─────────────────────────────────────────────────────────────────
+
+module_fail2ban() {
+  should_run_module "fail2ban" "INSTALL_FAIL2BAN" || return 0
+
+  apt-get -y install fail2ban
+  mkdir -p /etc/fail2ban/jail.d
+  cat > /etc/fail2ban/jail.d/the-provisioner.local <<EOF
+# The Provisioner — Copyright (c) Carlo Savino — BSD-3-Clause
+[sshd]
+enabled = true
+port = ${UFW_SSH_PORT}
+maxretry = 5
+bantime = 3600
+findtime = 600
+EOF
+  if is_yes "$INSTALL_PROFTPD"; then
+    cat >> /etc/fail2ban/jail.d/the-provisioner.local <<EOF
+
+[proftpd]
+enabled = true
+port = ${PROFTPD_PORT}
+maxretry = 5
+bantime = 3600
+EOF
+  fi
+
+  systemctl enable fail2ban
+  systemctl restart fail2ban
+  mark_module_done "fail2ban"
+  success "Fail2ban configurato → /etc/fail2ban/jail.d/the-provisioner.local"
+}
+
+# ─── Timezone ─────────────────────────────────────────────────────────────────
+
+module_timezone() {
+  should_run_module "timezone" "INSTALL_TIMEZONE" || return 0
+
+  local tz="${SYSTEM_TIMEZONE:-}"
+  if [[ -z "$tz" ]]; then
+    tz="$(timedatectl show -pTimezone --value 2>/dev/null || echo "Europe/Rome")"
+    if [[ "$INTERACTIVE" == "yes" ]]; then
+      prompt_var SYSTEM_TIMEZONE "Timezone (IANA)" "$tz"
+      tz="$SYSTEM_TIMEZONE"
+    else
+      SYSTEM_TIMEZONE="$tz"
+    fi
+  fi
+
+  [[ -f "/usr/share/zoneinfo/${tz}" ]] || die "Timezone non valida: ${tz}"
+  timedatectl set-timezone "$tz"
+  mark_module_done "timezone"
+  success "Timezone → ${tz}"
+}
+
+# ─── ProFTPd ──────────────────────────────────────────────────────────────────
+
+module_proftpd() {
+  should_run_module "proftpd" "INSTALL_PROFTPD" || return 0
+
+  apt-get -y install proftpd-core proftpd-mod-crypto ssl-cert || \
+    apt-get -y install proftpd-basic proftpd-mod-crypto ssl-cert || \
+    die "Installazione ProFTPd fallita"
+
+  if [[ "$INTERACTIVE" == "yes" ]]; then
+    prompt_var PROFTPD_PORT "Porta FTP" "${PROFTPD_PORT:-21}"
+    prompt_var PROFTPD_USER "Utente UNIX per FTP (es. ftpuser)" "${PROFTPD_USER:-}"
+    prompt_yes_no PROFTPD_TLS "Abilitare TLS (FTPS esplicito)?" "${PROFTPD_TLS:-yes}"
+    prompt_var PROFTPD_PASSIVE_MIN "Porta passive min" "${PROFTPD_PASSIVE_MIN:-40000}"
+    prompt_var PROFTPD_PASSIVE_MAX "Porta passive max" "${PROFTPD_PASSIVE_MAX:-40100}"
+    prompt_yes_no PROFTPD_ALLOW_ANONYMOUS "Consentire FTP anonimo?" "no"
+  else
+    is_yes "${PROFTPD_TLS:-auto}" && PROFTPD_TLS=yes || true
+  fi
+
+  [[ -n "$PROFTPD_USER" ]] || die "PROFTPD_USER obbligatorio"
+  id "$PROFTPD_USER" &>/dev/null || useradd -m -s /usr/sbin/nologin "$PROFTPD_USER"
+
+  local tls_lines=""
+  if is_yes "$PROFTPD_TLS"; then
+    tls_lines="
+  <IfModule mod_tls.c>
+    TLSEngine on
+    TLSRequired off
+    TLSProtocol TLSv1.2 TLSv1.3
+    TLSRSACertificateFile /etc/ssl/certs/ssl-cert-snakeoil.pem
+    TLSRSACertificateKeyFile /etc/ssl/private/ssl-cert-snakeoil.key
+  </IfModule>"
+  fi
+
+  cat > /etc/proftpd/conf.d/the-provisioner.conf <<EOF
+# The Provisioner — Copyright (c) Carlo Savino — BSD-3-Clause
+<Global>
+  Port ${PROFTPD_PORT}
+  PassivePorts ${PROFTPD_PASSIVE_MIN} ${PROFTPD_PASSIVE_MAX}
+</Global>
+<Limit LOGIN>
+  AllowUser ${PROFTPD_USER}
+  DenyAll
+</Limit>
+${tls_lines}
+EOF
+
+  proftpd -t 2>/dev/null || proftpd -t -d 5 || warn "Validazione proftpd non disponibile"
+  systemctl enable proftpd
+  systemctl restart proftpd
+
+  if is_yes "$INSTALL_UFW"; then
+    ufw allow "${PROFTPD_PORT}/tcp" comment 'ProFTPd' 2>/dev/null || true
+    ufw allow "${PROFTPD_PASSIVE_MIN}:${PROFTPD_PASSIVE_MAX}/tcp" comment 'ProFTPd passive' 2>/dev/null || true
+  fi
+
+  mark_module_done "proftpd"
+  success "ProFTPd → /etc/proftpd/conf.d/the-provisioner.conf (utente: ${PROFTPD_USER})"
+  warn "Imposta password: passwd ${PROFTPD_USER}"
+  cloud_firewall_reminder
 }
 
 # ─── Docker ───────────────────────────────────────────────────────────────────
@@ -1046,6 +1462,7 @@ docker_codename_for_repo() {
 }
 
 module_docker() {
+  should_run_module "docker" "INSTALL_DOCKER" || return 0
   info "Installazione Docker Engine (ecosistema completo)..."
   apt-get -y install gnupg ca-certificates curl apt-transport-https || \
     die "Impossibile installare dipendenze Docker (gnupg, curl, ...)"
@@ -1109,6 +1526,7 @@ https://download.docker.com/linux/debian ${docker_codename} stable" \
 
   is_yes "$INSTALL_BASH_ALIASES" && configure_bash_aliases yes || true
   docker --version
+  mark_module_done "docker"
   success "Docker installato e attivo."
 }
 
@@ -1159,17 +1577,21 @@ EOF
 }
 
 module_ensure_boot_services() {
+  should_run_module "boot_services" "INSTALL_BOOT_SERVICES" || return 0
   info "Abilitazione servizi al boot..."
   for svc in cron postfix; do
     systemctl enable "$svc" 2>/dev/null || true
     systemctl start  "$svc" 2>/dev/null || true
   done
   is_yes "$INSTALL_MONIT" && systemctl enable monit 2>/dev/null && systemctl start monit 2>/dev/null || true
+  is_yes "$INSTALL_FAIL2BAN" && systemctl enable fail2ban 2>/dev/null && systemctl start fail2ban 2>/dev/null || true
+  is_yes "$INSTALL_PROFTPD" && systemctl enable proftpd 2>/dev/null && systemctl start proftpd 2>/dev/null || true
   systemctl is-enabled cron >/dev/null 2>&1 && info "cron: abilitato al boot" || warn "cron: non abilitato"
   is_yes "$INSTALL_MONIT" && systemctl is-enabled monit >/dev/null 2>&1 && info "monit: abilitato al boot" || true
   [[ -f /etc/cron.d/logwatch ]]           && info "logwatch: /etc/cron.d/logwatch"
   [[ -f /etc/cron.d/ram-usage-monitor ]]  && info "ram monitor: cron ogni 5 min"
   [[ -f /etc/cron.d/smart-monitor ]]      && info "smart monitor: cron giornaliero"
+  mark_module_done "boot_services"
   success "Servizi monitoraggio → avvio automatico via systemd/cron."
 }
 
@@ -1257,6 +1679,10 @@ Componenti installati
   Logwatch:        ${INSTALL_LOGWATCH}
   Monitor RAM:     ${INSTALL_RAM_MONITOR}
   Monitor SMART:   ${INSTALL_SMART_MONITOR}
+  SSH hardening:   ${INSTALL_SSH_HARDENING}
+  Fail2ban:        ${INSTALL_FAIL2BAN}
+  Timezone:        ${INSTALL_TIMEZONE}${SYSTEM_TIMEZONE:+ (${SYSTEM_TIMEZONE})}
+  ProFTPd:         ${INSTALL_PROFTPD}
   Boot services:   ${INSTALL_BOOT_SERVICES}
 
 Riepilogo
@@ -1302,6 +1728,8 @@ EOF
   is_yes "$INSTALL_UFW" && echo "  SSH:    porta ${UFW_SSH_PORT} (ufw + ssh.service)"
   is_yes "$INSTALL_MONIT" && echo "  Monit:  /etc/monit/monitrc"
   is_yes "$INSTALL_LOGWATCH" && echo "  Logwatch: /etc/logwatch/conf/logwatch.conf"
+  is_yes "$INSTALL_FAIL2BAN" && echo "  Fail2ban: /etc/fail2ban/jail.d/the-provisioner.local"
+  is_yes "$INSTALL_PROFTPD" && echo "  ProFTPd:  /etc/proftpd/conf.d/the-provisioner.conf (utente: ${PROFTPD_USER:-?})"
 
   echo
   echo "--"
@@ -1363,9 +1791,11 @@ provision_on_exit() {
 }
 
 module_cron() {
+  should_run_module "cron" "INSTALL_CRON" || return 0
   apt-get -y install cron
   systemctl enable cron
   systemctl start cron
+  mark_module_done "cron"
   success "Cron installato e attivo."
 }
 
@@ -1396,16 +1826,24 @@ prompt_notifications_mail() {
 # ─── Monit ────────────────────────────────────────────────────────────────────
 
 module_monit() {
+  should_run_module "monit" "INSTALL_MONIT" || return 0
   apt-get -y install monit
   verify_postfix_for_mail
   show_mail_architecture
 
+  resolve_monit_services
   info "Configurazione Monit:"
   info "  (1) email destinatario alert  (2) servizi da monitorare"
   info "  Il mail server è Postfix locale — già configurato con smarthost."
   prompt_var_force MONIT_ADMIN_EMAIL    "Email destinatario notifiche Monit" "${MONIT_ADMIN_EMAIL:-${SMTP_FROM:-root@localhost}}"
   prompt_var_force MONIT_CHECK_INTERVAL "Intervallo controllo (secondi)" "${MONIT_CHECK_INTERVAL:-60}"
-  prompt_var_force MONIT_SERVICES       "Servizi (ssh,nginx,docker,filesystem,custom)" "${MONIT_SERVICES:-ssh,docker,filesystem}"
+  if [[ "$INTERACTIVE" == "yes" && "${MONIT_SERVICES,,}" != "auto" ]]; then
+    prompt_var_force MONIT_SERVICES "Servizi (auto calcolato: ${MONIT_SERVICES})" "${MONIT_SERVICES}"
+  elif [[ "$INTERACTIVE" == "yes" ]]; then
+    info "Servizi Monit proposti: ${MONIT_SERVICES}"
+    confirm "Usare questa lista servizi Monit?" "y" || \
+      prompt_var_force MONIT_SERVICES "Servizi Monit (virgola)" "${MONIT_SERVICES}"
+  fi
   prompt_var_force UFW_SSH_PORT         "Porta SSH per check Monit" "${UFW_SSH_PORT:-22}"
 
   [[ -f /etc/monit/monitrc ]] && cp /etc/monit/monitrc "/etc/monit/monitrc.bak.$(date +%s)"
@@ -1472,6 +1910,22 @@ check process docker matching "dockerd"
     if 5 restarts within 5 cycles then alert
 DOCEOF
         ;;
+      postfix)
+        cat > /etc/monit/conf-enabled/postfix <<'PFEOF'
+check process postfix with pidfile /var/spool/postfix/pid/master.pid
+    start program = "/bin/systemctl start postfix"
+    stop program  = "/bin/systemctl stop postfix"
+    if 5 restarts within 5 cycles then alert
+PFEOF
+        ;;
+      proftpd)
+        cat > /etc/monit/conf-enabled/proftpd <<'PFTPDEOF'
+check process proftpd matching "proftpd"
+    start program = "/bin/systemctl start proftpd"
+    stop program  = "/bin/systemctl stop proftpd"
+    if 5 restarts within 5 cycles then alert
+PFTPDEOF
+        ;;
       filesystem)
         cat > /etc/monit/conf-enabled/filesystem <<'FSEOF'
 check filesystem rootfs with path /
@@ -1508,20 +1962,27 @@ CUSTOMEOF
   if [[ "$INTERACTIVE" == "yes" ]] && confirm "Inviare email di test Monit?" "y"; then
     test_notification_mail "$MONIT_ADMIN_EMAIL"
   fi
+  mark_module_done "monit"
   success "Monit → /etc/monit/monitrc"
 }
 
 module_logwatch() {
+  should_run_module "logwatch" "INSTALL_LOGWATCH" || return 0
   apt-get -y install logwatch
   verify_postfix_for_mail
   show_mail_architecture
 
+  resolve_logwatch_services
   info "Configurazione Logwatch (solo MailTo/MailFrom — Postfix gestisce smarthost):"
   prompt_var_force LOGWATCH_EMAIL       "Email destinatario report giornaliero" "${LOGWATCH_EMAIL:-${MONIT_ADMIN_EMAIL:-root@localhost}}"
   prompt_var_force SMTP_FROM            "Email mittente (MailFrom)" "${SMTP_FROM:-$SMTP_USER}"
   prompt_var_force LOGWATCH_DETAIL      "Dettaglio (Low, Med, High)" "${LOGWATCH_DETAIL:-Med}"
   prompt_var_force LOGWATCH_RANGE       "Intervallo (Yesterday, Today, All)" "${LOGWATCH_RANGE:-Yesterday}"
-  prompt_var_force LOGWATCH_SERVICES    "Servizi log (All o sshd,postfix,...)" "${LOGWATCH_SERVICES:-All}"
+  if [[ "$INTERACTIVE" == "yes" ]]; then
+    info "Servizi Logwatch proposti: ${LOGWATCH_SERVICES}"
+    confirm "Usare questa lista Logwatch?" "y" || \
+      prompt_var_force LOGWATCH_SERVICES "Servizi log (virgola)" "${LOGWATCH_SERVICES}"
+  fi
   prompt_var_force LOGWATCH_FORMAT      "Formato (text, html)" "${LOGWATCH_FORMAT:-text}"
   prompt_var_force LOGWATCH_CRON_HOUR   "Ora invio giornaliero (0-23)" "${LOGWATCH_CRON_HOUR:-6}"
 
@@ -1559,6 +2020,7 @@ EOF
       || warn "Invio Logwatch fallito — verifica Postfix"
   fi
   success "Logwatch configurato → /etc/logwatch/conf/logwatch.conf (cron ${LOGWATCH_CRON_HOUR}:00)"
+  mark_module_done "logwatch"
 }
 
 prompt_ram_monitor_config() {
@@ -1571,6 +2033,7 @@ prompt_ram_monitor_config() {
 }
 
 module_ram_monitor() {
+  should_run_module "ram_monitor" "INSTALL_RAM_MONITOR" || return 0
   apt-get -y install curl
   prompt_ram_monitor_config
 
@@ -1609,6 +2072,7 @@ EOF
   "${script_bin}" && success "RAM monitor OK (test eseguito)" || warn "Test RAM monitor con avvisi — controlla log"
 
   success "RAM monitor installato (cron ogni 5 min, avvio via cron al boot)"
+  mark_module_done "ram_monitor"
 }
 
 prompt_smart_monitor_config() {
@@ -1622,6 +2086,7 @@ prompt_smart_monitor_config() {
 }
 
 module_smart_monitor() {
+  should_run_module "smart_monitor" "INSTALL_SMART_MONITOR" || return 0
   apt-get -y install smartmontools curl gawk
   prompt_smart_monitor_config
 
@@ -1649,6 +2114,7 @@ EOF
   info "  Config: /etc/smart-monitor.env"
   /usr/local/bin/smart-monitor.sh --test 2>/dev/null && success "SMART monitor test OK" || true
   success "SMART monitor installato (cron ${SMART_CRON_HOUR}:00, avvio via cron al boot)"
+  mark_module_done "smart_monitor"
 }
 
 # ─── Selezione componenti ─────────────────────────────────────────────────────
@@ -1675,8 +2141,17 @@ collect_component_selection() {
 
   prompt_yes_no INSTALL_BUILD    "Installare build-essential (gcc, make)?" "yes"
   prompt_yes_no INSTALL_UFW      "Configurare UFW (firewall)?" "yes"
+  if is_yes "$INSTALL_UFW"; then
+    prompt_yes_no INSTALL_SSH_HARDENING "Applicare hardening SSH (sshd_config.d)?" "yes"
+    prompt_yes_no INSTALL_FAIL2BAN      "Installare Fail2ban (sshd + proftpd)?" "yes"
+  else
+    prompt_yes_no INSTALL_SSH_HARDENING "Applicare hardening SSH?" "no"
+    prompt_yes_no INSTALL_FAIL2BAN      "Installare Fail2ban?" "no"
+  fi
   prompt_yes_no INSTALL_SMTP     "Installare Postfix relay (smarthost)?" "yes"
   prompt_yes_no INSTALL_DOCKER   "Installare Docker?" "no"
+  prompt_yes_no INSTALL_TIMEZONE "Configurare timezone di sistema?" "yes"
+  prompt_yes_no INSTALL_PROFTPD  "Installare ProFTPd (FTP/FTPS)?" "no"
   prompt_yes_no INSTALL_MONIT    "Installare Monit?" "no"
   prompt_yes_no INSTALL_LOGWATCH "Installare Logwatch?" "no"
   prompt_yes_no INSTALL_CRON     "Verificare/installare cron?" "yes"
@@ -1688,8 +2163,12 @@ collect_component_selection() {
   info "Riepilogo selezione:"
   echo "  build-essential : ${INSTALL_BUILD}"
   echo "  UFW             : ${INSTALL_UFW}"
+  echo "  SSH hardening   : ${INSTALL_SSH_HARDENING}"
+  echo "  Fail2ban        : ${INSTALL_FAIL2BAN}"
   echo "  Postfix relay   : ${INSTALL_SMTP}"
   echo "  Docker          : ${INSTALL_DOCKER}"
+  echo "  Timezone        : ${INSTALL_TIMEZONE}"
+  echo "  ProFTPd         : ${INSTALL_PROFTPD}"
   echo "  Monit           : ${INSTALL_MONIT}"
   echo "  Logwatch        : ${INSTALL_LOGWATCH}"
   echo "  Cron            : ${INSTALL_CRON}"
@@ -1700,10 +2179,16 @@ collect_component_selection() {
 }
 
 resolve_auto_selection_noninteractive() {
+  local v
   for v in INSTALL_BUILD INSTALL_UFW INSTALL_SMTP INSTALL_DOCKER INSTALL_MONIT INSTALL_LOGWATCH \
-           INSTALL_CRON INSTALL_RAM_MONITOR INSTALL_SMART_MONITOR INSTALL_BASH_ALIASES INSTALL_BOOT_SERVICES; do
+           INSTALL_CRON INSTALL_RAM_MONITOR INSTALL_SMART_MONITOR INSTALL_BASH_ALIASES INSTALL_BOOT_SERVICES \
+           INSTALL_PROFTPD; do
+    [[ "${!v}" == "auto" ]] && printf -v "$v" '%s' "no"
+  done
+  [[ "${INSTALL_TIMEZONE}" == "auto" ]] && INSTALL_TIMEZONE=yes
+  for v in INSTALL_FAIL2BAN INSTALL_SSH_HARDENING; do
     if [[ "${!v}" == "auto" ]]; then
-      printf -v "$v" '%s' "no"
+      is_yes "$INSTALL_UFW" && printf -v "$v" '%s' "yes" || printf -v "$v" '%s' "no"
     fi
   done
   # Se monit/logwatch senza smtp esplicito, abilita smtp se credenziali presenti
@@ -1730,6 +2215,13 @@ prompt_reboot() {
       ;;
     *) warn "ALLOW_REBOOT='${ALLOW_REBOOT}' non valido — riavvio saltato." ;;
   esac
+
+  if is_yes "$do_reboot"; then
+    if is_yes "$INSTALL_UFW" && [[ "$INTERACTIVE" == "yes" ]] && ! is_yes "$SSH_PREFLIGHT_CONFIRMED"; then
+      warn "Reboot annullato — verifica SSH su una seconda sessione prima di riavviare"
+      do_reboot=no
+    fi
+  fi
 
   if is_yes "$do_reboot"; then
     echo
@@ -1759,6 +2251,8 @@ main() {
     resolve_auto_selection_noninteractive
   fi
 
+  preflight_checks
+
   local needs_mail=false
   is_yes "$INSTALL_SMTP"        && needs_mail=true || true
   is_yes "$INSTALL_MONIT"       && needs_mail=true || true
@@ -1779,33 +2273,36 @@ main() {
   info "━━━ Aggiornamento sistema ━━━"
   module_base
 
-  if is_yes "$INSTALL_BUILD"; then
-    info "━━━ build-essential ━━━"
-    module_build_essential
-  fi
+  info "━━━ build-essential ━━━"
+  module_build_essential
 
-  if is_yes "$INSTALL_SMTP"; then
-    info "━━━ Postfix relay (smarthost) ━━━"
-    module_smtp
-  elif $needs_mail; then
+  info "━━━ Postfix relay (smarthost) ━━━"
+  module_smtp
+  if $needs_mail && ! smtp_is_configured; then
     info "━━━ Postfix (richiesto per notifiche) ━━━"
     prompt_notifications_mail
   fi
 
-  if is_yes "$INSTALL_UFW"; then
-    info "━━━ UFW ━━━"
-    module_ufw
-  fi
+  info "━━━ UFW ━━━"
+  module_ufw
 
-  if is_yes "$INSTALL_DOCKER"; then
-    info "━━━ Docker ━━━"
-    module_docker
-  fi
+  info "━━━ SSH hardening ━━━"
+  module_ssh_hardening
 
-  if is_yes "$INSTALL_CRON"; then
-    info "━━━ Cron ━━━"
-    module_cron
-  fi
+  info "━━━ Fail2ban ━━━"
+  module_fail2ban
+
+  info "━━━ Docker ━━━"
+  module_docker
+
+  info "━━━ Timezone ━━━"
+  module_timezone
+
+  info "━━━ ProFTPd ━━━"
+  module_proftpd
+
+  info "━━━ Cron ━━━"
+  module_cron
 
   if is_yes "$INSTALL_MONIT" || is_yes "$INSTALL_LOGWATCH"; then
     if ! smtp_is_configured; then
@@ -1818,34 +2315,26 @@ main() {
     fi
   fi
 
-  if is_yes "$INSTALL_MONIT"; then
-    info "━━━ Monit ━━━"
-    module_monit
-  fi
+  info "━━━ Monit ━━━"
+  module_monit
 
-  if is_yes "$INSTALL_LOGWATCH"; then
-    info "━━━ Logwatch ━━━"
-    module_logwatch
-  fi
+  info "━━━ Logwatch ━━━"
+  module_logwatch
 
-  if is_yes "$INSTALL_RAM_MONITOR"; then
-    info "━━━ Monitor RAM ━━━"
+  if is_yes "$INSTALL_RAM_MONITOR" || is_yes "$INSTALL_SMART_MONITOR"; then
     smtp_is_configured || prompt_notifications_mail
-    module_ram_monitor
   fi
 
-  if is_yes "$INSTALL_SMART_MONITOR"; then
-    info "━━━ Monitor SMART ━━━"
-    smtp_is_configured || prompt_notifications_mail
-    module_smart_monitor
-  fi
+  info "━━━ Monitor RAM ━━━"
+  module_ram_monitor
+
+  info "━━━ Monitor SMART ━━━"
+  module_smart_monitor
 
   is_yes "$INSTALL_BASH_ALIASES" && ! is_yes "$INSTALL_DOCKER" && configure_bash_aliases no || true
 
-  if is_yes "$INSTALL_BOOT_SERVICES"; then
-    info "━━━ Avvio automatico al boot ━━━"
-    module_ensure_boot_services
-  fi
+  info "━━━ Avvio automatico al boot ━━━"
+  module_ensure_boot_services
 
   save_runtime_config
 
@@ -1861,12 +2350,16 @@ main() {
   is_yes "$INSTALL_LOGWATCH"     && info "  Logwatch: /etc/logwatch/conf/logwatch.conf"
   is_yes "$INSTALL_RAM_MONITOR"  && info "  RAM:      /usr/local/bin/ram-usage-monitor.sh"
   is_yes "$INSTALL_SMART_MONITOR" && info "  SMART:    /usr/local/bin/smart-monitor.sh"
+  is_yes "$INSTALL_FAIL2BAN"     && info "  Fail2ban: /etc/fail2ban/jail.d/the-provisioner.local"
+  is_yes "$INSTALL_PROFTPD"      && info "  ProFTPd:  /etc/proftpd/conf.d/the-provisioner.conf"
+  is_yes "$INSTALL_SSH_HARDENING" && info "  SSH:      /etc/ssh/sshd_config.d/99-debian-provision-hardening.conf"
   is_yes "$INSTALL_BASH_ALIASES" && info "  Alias:    source /root/.bashrc  (sessione SSH corrente)"
 
   is_yes "$INSTALL_UFW" && verify_ssh_ufw_alignment
 
   echo
   send_install_report 0
+  prompt_ssh_connectivity_check
   prompt_reboot
 }
 

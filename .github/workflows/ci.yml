@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bash syntax check
+        run: bash -n install.sh
+
+      - name: ShellCheck
+        run: |
+          shellcheck --version
+          shellcheck -S warning -x install.sh
+
+      - name: Verify version in header
+        run: |
+          grep -q 'VERSION="1.6.0"' install.sh
+          grep -q 'v1.6.0' install.sh
