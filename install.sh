@@ -178,7 +178,8 @@ fi
 
 log() {
   local level="$1"; shift
-  local plain="[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*"
+  local plain
+  plain="[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*"
   local colored="$plain"
   case "$level" in
     INFO)  colored="[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] ${BLUE}$*${NC}" ;;
@@ -412,8 +413,8 @@ is_yes() {
 }
 
 list_contains() {
-  local list="$1" item="$2" x
-  IFS=',' read -ra _lc_arr <<< "$list"
+  local csv="$1" item="$2" x
+  IFS=',' read -ra _lc_arr <<< "$csv"
   for x in "${_lc_arr[@]}"; do
     x="$(echo "$x" | tr '[:upper:]' '[:lower:]' | xargs)"
     [[ "$x" == "${item,,}" ]] && return 0
@@ -519,23 +520,23 @@ preflight_checks() {
 }
 
 build_monit_services() {
-  local list=()
-  is_yes "$INSTALL_UFW"        && list+=("ssh")
-  is_yes "$INSTALL_DOCKER"     && list+=("docker")
-  is_yes "$INSTALL_SMTP"       && list+=("postfix")
-  is_yes "$INSTALL_PROFTPD"    && list+=("proftpd")
-  list+=("filesystem")
-  (IFS=','; echo "${list[*]}")
+  local services=()
+  is_yes "$INSTALL_UFW"        && services+=("ssh")
+  is_yes "$INSTALL_DOCKER"     && services+=("docker")
+  is_yes "$INSTALL_SMTP"       && services+=("postfix")
+  is_yes "$INSTALL_PROFTPD"    && services+=("proftpd")
+  services+=("filesystem")
+  (IFS=','; echo "${services[*]}")
 }
 
 build_logwatch_services() {
-  local list=("sshd")
-  is_yes "$INSTALL_SMTP"     && list+=("postfix")
-  is_yes "$INSTALL_FAIL2BAN" && list+=("fail2ban")
-  is_yes "$INSTALL_MONIT"    && list+=("monit")
-  is_yes "$INSTALL_PROFTPD"  && list+=("proftpd")
-  is_yes "$INSTALL_DOCKER"   && list+=("docker")
-  (IFS=','; echo "${list[*]}")
+  local services=("sshd")
+  is_yes "$INSTALL_SMTP"     && services+=("postfix")
+  is_yes "$INSTALL_FAIL2BAN" && services+=("fail2ban")
+  is_yes "$INSTALL_MONIT"    && services+=("monit")
+  is_yes "$INSTALL_PROFTPD"  && services+=("proftpd")
+  is_yes "$INSTALL_DOCKER"   && services+=("docker")
+  (IFS=','; echo "${services[*]}")
 }
 
 resolve_monit_services() {
@@ -985,9 +986,9 @@ ufw_apply_port_entry() {
 }
 
 ufw_apply_port_list() {
-  local list="$1" default_proto="${2:-tcp}" comment="${3:-Custom}"
-  [[ -n "$list" ]] || return 0
-  IFS=',' read -ra PORTS <<< "$list"
+  local port_csv="$1" default_proto="${2:-tcp}" comment="${3:-Custom}"
+  [[ -n "$port_csv" ]] || return 0
+  IFS=',' read -ra PORTS <<< "$port_csv"
   for p in "${PORTS[@]}"; do ufw_apply_port_entry "$p" "$default_proto" "$comment"; done
 }
 

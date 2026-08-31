@@ -1,5 +1,7 @@
-# Forza LF per script shell (evita errore bash\r su Linux)
+# Forza LF e UTF-8 (evita README illeggibile in UTF-16 su Windows)
 *.sh text eol=lf
 *.env text eol=lf
-README.md text eol=lf
-LICENSE text eol=lf
+*.md text eol=lf working-tree-encoding=UTF-8
+LICENSE text eol=lf working-tree-encoding=UTF-8
+renovate.json text eol=lf working-tree-encoding=UTF-8
+.github/** text eol=lf working-tree-encoding=UTF-8
