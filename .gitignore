@@ -1,0 +1,8 @@
+# Log e marker generati su server target
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
