@@ -36,13 +36,13 @@ if grep -q $'\r' "$0" 2>/dev/null; then
   sed -i 's/\r$//' "$0"
   exec /usr/bin/env bash "$0" "$@"
 fi
-echo "[install.sh] debian-provision v1.6.0 — avvio..." >&2
+echo "[install.sh] debian-provision v1.6.1 — avvio..." >&2
 
 # Nota: NON usare set -e — con pattern [[ cond ]] && cmd le funzioni
 # restituiscono exit 1 quando la condizione è falsa e lo script termina in silenzio.
 set -uo pipefail
 
-VERSION="1.6.0"
+VERSION="1.6.1"
 PROVISIONER_AUTHOR="Carlo Savino"
 PROVISIONER_EMAIL="info@savinocarlo.it"
 PROVISIONER_WEBSITE="www.savinocarlo.it"
@@ -150,6 +150,9 @@ PROFTPD_PASSIVE_MIN="${PROFTPD_PASSIVE_MIN:-40000}"
 PROFTPD_PASSIVE_MAX="${PROFTPD_PASSIVE_MAX:-40100}"
 PROFTPD_USER="${PROFTPD_USER:-}"
 PROFTPD_ALLOW_ANONYMOUS="${PROFTPD_ALLOW_ANONYMOUS:-no}"
+PROFTPD_CHROOT="${PROFTPD_CHROOT:-yes}"
+PROFTPD_MAX_CLIENTS="${PROFTPD_MAX_CLIENTS:-10}"
+PROFTPD_MAX_INSTANCES="${PROFTPD_MAX_INSTANCES:-30}"
 
 # Report email finale provisioning
 SEND_INSTALL_REPORT="${SEND_INSTALL_REPORT:-auto}"
@@ -551,6 +554,69 @@ resolve_logwatch_services() {
     LOGWATCH_SERVICES="$(build_logwatch_services)"
     info "Logwatch servizi (auto): ${LOGWATCH_SERVICES}"
   fi
+  normalize_logwatch_services
+}
+
+logwatch_wants_all() {
+  [[ "${LOGWATCH_SERVICES,,}" == "all" ]]
+}
+
+normalize_logwatch_services() {
+  local raw="${LOGWATCH_SERVICES// /}"
+  if logwatch_wants_all; then
+    LOGWATCH_SERVICES="All"
+    return 0
+  fi
+  if [[ "$raw" == *",All,"* || "$raw" == All,* || "$raw" == *,All ]]; then
+    warn "LOGWATCH_SERVICES misto All + servizi — uso solo All (in Logwatch non si combinano)"
+    LOGWATCH_SERVICES="All"
+  fi
+}
+
+write_logwatch_conf_file() {
+  local conf="/etc/logwatch/conf/logwatch.conf"
+  mkdir -p /etc/logwatch/conf /var/cache/logwatch
+  # Fragment Debian (es. Service = All) sommati al nostro file causano l'errore
+  # "if All selected, only - items are allowed"
+  rm -f /etc/logwatch/conf/logwatch.conf.d/*.conf 2>/dev/null || true
+
+  cat > "$conf" <<EOF
+# Generato da install.sh — The Provisioner
+MailTo = ${LOGWATCH_EMAIL}
+MailFrom = ${SMTP_FROM}
+Detail = ${LOGWATCH_DETAIL}
+Range = ${LOGWATCH_RANGE}
+Format = ${LOGWATCH_FORMAT}
+EOF
+
+  if logwatch_wants_all || [[ "$LOGWATCH_SERVICES" == "All" ]]; then
+    echo "Service = All" >> "$conf"
+  else
+    local svc
+    IFS=',' read -ra _lw_arr <<< "$LOGWATCH_SERVICES"
+    for svc in "${_lw_arr[@]}"; do
+      svc="$(echo "$svc" | xargs)"
+      [[ -z "$svc" ]] && continue
+      [[ "${svc,,}" == "all" ]] && continue
+      if [[ "$svc" == -* ]]; then
+        echo "Service = \"${svc}\"" >> "$conf"
+      else
+        echo "Service = ${svc}" >> "$conf"
+      fi
+    done
+    grep -q '^Service =' "$conf" || echo "Service = sshd" >> "$conf"
+  fi
+}
+
+verify_logwatch_config() {
+  local err
+  err="$(logwatch --output stdout --range Today --detail Low 2>&1)" || true
+  if echo "$err" | grep -qi 'Wrong configuration entry for "Service"'; then
+    die "Config Logwatch non valida (Service). File: /etc/logwatch/conf/logwatch.conf"
+  fi
+  if echo "$err" | grep -qi 'error'; then
+    warn "Logwatch segnala: $(echo "$err" | head -3 | tr '\n' ' ')"
+  fi
 }
 
 cloud_firewall_reminder() {
@@ -698,6 +764,8 @@ ${BOLD}VARIABILI (esempio):${NC}
   MONIT_ADMIN_EMAIL, LOGWATCH_EMAIL, DOCKER_USERS
   SYSTEM_TIMEZONE, SSH_PERMIT_ROOT, SSH_PASSWORD_AUTH, SSH_ALLOW_USERS
   PROFTPD_PORT, PROFTPD_TLS, PROFTPD_USER, PROFTPD_PASSIVE_MIN, PROFTPD_PASSIVE_MAX
+  PROFTPD_CHROOT, PROFTPD_MAX_CLIENTS, PROFTPD_MAX_INSTANCES
+  LOGWATCH_SERVICES (auto, All, oppure sshd,postfix,... — una riga Service per servizio)
   ALLOW_REBOOT (yes/no/auto) — riavvio a fine provisioning
   SEND_INSTALL_REPORT (yes/no/auto) — email report finale (default: auto)
   INSTALL_REPORT_EMAIL — destinatario report (default: Monit/Logwatch/SMTP_FROM)
@@ -1386,6 +1454,24 @@ module_timezone() {
 
 # ─── ProFTPd ──────────────────────────────────────────────────────────────────
 
+prompt_proftpd_config() {
+  info "Configurazione ProFTPd (minimo consigliato):"
+  prompt_var PROFTPD_PORT "Porta controllo FTP" "${PROFTPD_PORT:-21}"
+  prompt_var_force PROFTPD_USER "Utente UNIX dedicato FTP" "${PROFTPD_USER:-ftpuser}"
+  prompt_yes_no PROFTPD_CHROOT "Limitare utente alla propria home (DefaultRoot, consigliato)?" "${PROFTPD_CHROOT:-yes}"
+  prompt_yes_no PROFTPD_TLS "Abilitare TLS / FTPS esplicito?" "${PROFTPD_TLS:-yes}"
+  prompt_var PROFTPD_PASSIVE_MIN "Porta passive min (range dati)" "${PROFTPD_PASSIVE_MIN:-40000}"
+  prompt_var PROFTPD_PASSIVE_MAX "Porta passive max (range dati)" "${PROFTPD_PASSIVE_MAX:-40100}"
+  prompt_var PROFTPD_MAX_CLIENTS "Max client FTP contemporanei" "${PROFTPD_MAX_CLIENTS:-10}"
+  prompt_var PROFTPD_MAX_INSTANCES "Max istanze ProFTPd" "${PROFTPD_MAX_INSTANCES:-30}"
+  prompt_yes_no PROFTPD_ALLOW_ANONYMOUS "Consentire FTP anonimo? (sconsigliato)" "no"
+  echo
+  info "Riepilogo ProFTPd:"
+  info "  Utente: ${PROFTPD_USER:-ftpuser} | Porta: ${PROFTPD_PORT} | TLS: ${PROFTPD_TLS}"
+  info "  Passive: ${PROFTPD_PASSIVE_MIN}-${PROFTPD_PASSIVE_MAX} | Chroot home: ${PROFTPD_CHROOT}"
+  is_yes "$INSTALL_UFW" && info "  UFW: verranno aperti porta ${PROFTPD_PORT} e range passive"
+}
+
 module_proftpd() {
   should_run_module "proftpd" "INSTALL_PROFTPD" || return 0
 
@@ -1394,12 +1480,7 @@ module_proftpd() {
     die "Installazione ProFTPd fallita"
 
   if [[ "$INTERACTIVE" == "yes" ]]; then
-    prompt_var PROFTPD_PORT "Porta FTP" "${PROFTPD_PORT:-21}"
-    prompt_var_force PROFTPD_USER "Utente UNIX per FTP" "${PROFTPD_USER:-ftpuser}"
-    prompt_yes_no PROFTPD_TLS "Abilitare TLS (FTPS esplicito)?" "${PROFTPD_TLS:-yes}"
-    prompt_var PROFTPD_PASSIVE_MIN "Porta passive min" "${PROFTPD_PASSIVE_MIN:-40000}"
-    prompt_var PROFTPD_PASSIVE_MAX "Porta passive max" "${PROFTPD_PASSIVE_MAX:-40100}"
-    prompt_yes_no PROFTPD_ALLOW_ANONYMOUS "Consentire FTP anonimo?" "no"
+    prompt_proftpd_config
   else
     is_yes "${PROFTPD_TLS:-auto}" && PROFTPD_TLS=yes || true
     [[ -n "$PROFTPD_USER" ]] || PROFTPD_USER="ftpuser"
@@ -1408,7 +1489,7 @@ module_proftpd() {
   [[ -n "$PROFTPD_USER" ]] || PROFTPD_USER="ftpuser"
   id "$PROFTPD_USER" &>/dev/null || useradd -m -s /usr/sbin/nologin "$PROFTPD_USER"
 
-  local tls_lines=""
+  local tls_lines="" chroot_line=""
   if is_yes "$PROFTPD_TLS"; then
     tls_lines="
   <IfModule mod_tls.c>
@@ -1419,12 +1500,16 @@ module_proftpd() {
     TLSRSACertificateKeyFile /etc/ssl/private/ssl-cert-snakeoil.key
   </IfModule>"
   fi
+  is_yes "$PROFTPD_CHROOT" && chroot_line="  DefaultRoot ~"
 
   cat > /etc/proftpd/conf.d/the-provisioner.conf <<EOF
 # The Provisioner — Copyright (c) Carlo Savino — BSD-3-Clause
 <Global>
   Port ${PROFTPD_PORT}
   PassivePorts ${PROFTPD_PASSIVE_MIN} ${PROFTPD_PASSIVE_MAX}
+  MaxClients ${PROFTPD_MAX_CLIENTS}
+  MaxInstances ${PROFTPD_MAX_INSTANCES}
+${chroot_line}
 </Global>
 <Limit LOGIN>
   AllowUser ${PROFTPD_USER}
@@ -1444,7 +1529,11 @@ EOF
 
   mark_module_done "proftpd"
   success "ProFTPd → /etc/proftpd/conf.d/the-provisioner.conf (utente: ${PROFTPD_USER})"
-  warn "Imposta password: passwd ${PROFTPD_USER}"
+  if [[ "$INTERACTIVE" == "yes" ]] && confirm "Impostare ora la password per ${PROFTPD_USER}?" "y"; then
+    passwd "$PROFTPD_USER" || warn "passwd non completato — esegui: passwd ${PROFTPD_USER}"
+  else
+    warn "Imposta password: passwd ${PROFTPD_USER}"
+  fi
   cloud_firewall_reminder
 }
 
@@ -1982,6 +2071,8 @@ module_logwatch() {
 
   resolve_logwatch_services
   info "Configurazione Logwatch (solo MailTo/MailFrom — Postfix gestisce smarthost):"
+  info "  Servizi: elenco separato da virgola (es. sshd,postfix) oppure 'All' per tutti i log."
+  info "  Con 'All' si possono usare solo esclusioni (es. -zz-network), non altri servizi insieme."
   prompt_var_force LOGWATCH_EMAIL       "Email destinatario report giornaliero" "${LOGWATCH_EMAIL:-${MONIT_ADMIN_EMAIL:-root@localhost}}"
   prompt_var_force SMTP_FROM            "Email mittente (MailFrom)" "${SMTP_FROM:-$SMTP_USER}"
   prompt_var_force LOGWATCH_DETAIL      "Dettaglio (Low, Med, High)" "${LOGWATCH_DETAIL:-Med}"
@@ -1989,23 +2080,14 @@ module_logwatch() {
   if [[ "$INTERACTIVE" == "yes" ]]; then
     info "Servizi Logwatch proposti: ${LOGWATCH_SERVICES}"
     confirm "Usare questa lista Logwatch?" "y" || \
-      prompt_var_force LOGWATCH_SERVICES "Servizi log (virgola)" "${LOGWATCH_SERVICES}"
+      prompt_var_force LOGWATCH_SERVICES "Servizi (virgola) o All" "${LOGWATCH_SERVICES}"
+    normalize_logwatch_services
   fi
   prompt_var_force LOGWATCH_FORMAT      "Formato (text, html)" "${LOGWATCH_FORMAT:-text}"
   prompt_var_force LOGWATCH_CRON_HOUR   "Ora invio giornaliero (0-23)" "${LOGWATCH_CRON_HOUR:-6}"
 
-  local mail_from_line="MailFrom = ${SMTP_FROM}"
-
-  mkdir -p /etc/logwatch/conf /var/cache/logwatch
-  cat > /etc/logwatch/conf/logwatch.conf <<EOF
-# Generato da install.sh — invio via Postfix/sendmail locale
-MailTo = ${LOGWATCH_EMAIL}
-${mail_from_line}
-Detail = ${LOGWATCH_DETAIL}
-Range = ${LOGWATCH_RANGE}
-Format = ${LOGWATCH_FORMAT}
-Service = ${LOGWATCH_SERVICES}
-EOF
+  write_logwatch_conf_file
+  verify_logwatch_config
 
   rm -f /etc/cron.daily/00logwatch /etc/cron.daily/logwatch
   if [[ "$LOGWATCH_CRON_HOUR" =~ ^[0-9]+$ ]]; then

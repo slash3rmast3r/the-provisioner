@@ -2,7 +2,7 @@
 
 **Debian server provisioning in a single file.**
 
-> **The Provisioner** · `install.sh` v1.6.0  
+> **The Provisioner** · `install.sh` v1.6.1  
 > **Author:** [Carlo Savino](https://github.com/slash3rmast3r) — [info@savinocarlo.it](mailto:info@savinocarlo.it) — [www.savinocarlo.it](https://www.savinocarlo.it)  
 > **License:** [BSD 3-Clause](LICENSE) — free to use; keep copyright and license text
 
@@ -41,6 +41,11 @@ Lo script legge `/etc/os-release` e `/etc/debian_version`, imposta un profilo pe
 | 11 | Bullseye | Supportato |
 | ≤ 10 | Buster e precedenti | Bloccato (override: `DEBIAN_ALLOW_OLD=yes`) |
 
+
+## Novità v1.6.1
+
+- **Logwatch fix** — servizi scritti come righe `Service = nome` separate (non virgola su una riga); rimossi fragment Debian in conflitto; validazione config a fine modulo
+- **ProFTPd** — prompt esteso: chroot home, max client/istanze, riepilogo, opzione `passwd` interattivo
 ## Novità v1.6.0
 
 - **Preflight** — spazio disco, RAM, DNS, avvisi systemd/SSH
@@ -154,14 +159,41 @@ Se `SSH_PASSWORD_AUTH=no`, lo script verifica la presenza di chiavi in `authoriz
 
 ## ProFTPd
 
+In modalità interattiva lo script chiede le opzioni minime consigliate (utente, TLS, chroot, porte passive, limiti client).
+
 | Variabile | Default | Descrizione |
 |-----------|---------|-------------|
 | `PROFTPD_USER` | `ftpuser` | Utente UNIX dedicato |
 | `PROFTPD_PORT` | `21` | Porta controllo |
 | `PROFTPD_TLS` | `yes` | FTPS esplicito (certificato snakeoil) |
-| `PROFTPD_PASSIVE_MIN/MAX` | `40000`–`40100` | Range porte passive |
+| `PROFTPD_CHROOT` | `yes` | `DefaultRoot ~` — utente confinato in home |
+| `PROFTPD_PASSIVE_MIN/MAX` | `40000`–`40100` | Range porte passive (aprire anche su UFW/cloud) |
+| `PROFTPD_MAX_CLIENTS` | `10` | Client simultanei |
+| `PROFTPD_MAX_INSTANCES` | `30` | Istanze server |
 
-Dopo l'installazione: `passwd PROFTPD_USER`. Fail2ban abilita jail `proftpd` se ProFTPd è installato.
+Dopo l'installazione: password con `passwd PROFTPD_USER` (o prompt a fine modulo). Fail2ban abilita jail `proftpd` se ProFTPd è installato.
+
+## Logwatch — servizi
+
+| `LOGWATCH_SERVICES` | Comportamento |
+|---------------------|---------------|
+| `auto` | Lista derivata dai componenti installati |
+| `All` | Tutti i log (solo esclusioni `-nome` ammesse oltre ad All) |
+| `sshd,postfix,...` | Una riga `Service =` per ogni servizio nel file generato |
+
+**Nota:** non usare `Service = All` insieme ad altri servizi nella stessa config — Logwatch restituisce errore. Lo script v1.6.1+ gestisce il formato correttamente.
+
+### Fix manuale su server già provisionato
+
+```bash
+sudo nano /etc/logwatch/conf/logwatch.conf
+# Sostituisci: Service = sshd,postfix,...
+# Con righe separate:
+# Service = sshd
+# Service = postfix
+sudo rm -f /etc/logwatch/conf/logwatch.conf.d/*.conf
+logwatch --output stdout --range Today --detail Low | head
+```
 
 ## Riavvio
 
@@ -217,7 +249,7 @@ Moduli `--only`: `base`, `build`, `smtp`, `ufw`, `ssh_hardening`, `fail2ban`, `d
 | `PREFLIGHT_STRICT` | `yes` (default) — blocca su disco/RAM/DNS insufficienti |
 | `CLOUD_PROVIDER` | `auto`, `aws`, `lightsail`, `hetzner`, `ovh` |
 | `MONIT_SERVICES` | `auto` (default) o lista virgola |
-| `LOGWATCH_SERVICES` | `auto` (default) o lista virgola |
+| `LOGWATCH_SERVICES` | `auto`, `All`, oppure `sshd,postfix,...` |
 | `SYSTEM_TIMEZONE` | Timezone IANA (default prompt: `Europe/Rome`) |
 
 ## Sviluppo e CI
