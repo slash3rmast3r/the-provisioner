@@ -36,13 +36,13 @@ if grep -q $'\r' "$0" 2>/dev/null; then
   sed -i 's/\r$//' "$0"
   exec /usr/bin/env bash "$0" "$@"
 fi
-echo "[install.sh] debian-provision v1.6.3 — avvio..." >&2
+echo "[install.sh] debian-provision v1.6.4 — avvio..." >&2
 
 # Nota: NON usare set -e — con pattern [[ cond ]] && cmd le funzioni
 # restituiscono exit 1 quando la condizione è falsa e lo script termina in silenzio.
 set -uo pipefail
 
-VERSION="1.6.3"
+VERSION="1.6.4"
 PROVISIONER_AUTHOR="Carlo Savino"
 PROVISIONER_EMAIL="info@savinocarlo.it"
 PROVISIONER_WEBSITE="www.savinocarlo.it"
@@ -557,8 +557,17 @@ systemd_unit_exists() {
   systemctl cat "$unit" &>/dev/null
 }
 
+logwatch_service_known() {
+  local svc="$1"
+  [[ "$svc" == -* ]] && return 0
+  [[ -f "/usr/share/logwatch/scripts/services/$svc" ]] && return 0
+  [[ -f "/etc/logwatch/scripts/services/$svc" ]] && return 0
+  return 1
+}
+
+# Alias retrocompatibile
 logwatch_script_exists() {
-  [[ -f "/usr/share/logwatch/scripts/services/$1" ]]
+  logwatch_service_known "$1"
 }
 
 monitoring_component_active() {
@@ -673,6 +682,7 @@ resolve_logwatch_services() {
     info "Logwatch servizi (auto: install/marker/OS): ${LOGWATCH_SERVICES}"
   fi
   normalize_logwatch_services
+  filter_logwatch_services
 }
 
 logwatch_wants_all() {
@@ -689,6 +699,28 @@ normalize_logwatch_services() {
     warn "LOGWATCH_SERVICES misto All + servizi — uso solo All (in Logwatch non si combinano)"
     LOGWATCH_SERVICES="All"
   fi
+}
+
+filter_logwatch_services() {
+  logwatch_wants_all && return 0
+  [[ "${LOGWATCH_SERVICES,,}" == "all" ]] && return 0
+  local filtered=() svc
+  IFS=',' read -ra _arr <<< "$LOGWATCH_SERVICES"
+  for svc in "${_arr[@]}"; do
+    svc="$(echo "$svc" | xargs)"
+    [[ -z "$svc" ]] && continue
+    [[ "${svc,,}" == "all" ]] && continue
+    if logwatch_service_known "$svc"; then
+      add_unique_csv_item filtered "$svc"
+    else
+      warn "Logwatch: servizio '${svc}' non supportato — escluso (Debian stock: ls /usr/share/logwatch/scripts/services/)"
+    fi
+  done
+  if ((${#filtered[@]} == 0)); then
+    warn "Logwatch: nessun servizio valido — fallback sshd"
+    filtered=(sshd)
+  fi
+  IFS=','; LOGWATCH_SERVICES="${filtered[*]}"
 }
 
 write_logwatch_conf_file() {
@@ -720,6 +752,10 @@ EOF
       svc="$(echo "$svc" | xargs)"
       [[ -z "$svc" ]] && continue
       [[ "${svc,,}" == "all" ]] && continue
+      if [[ "$svc" != -* ]] && ! logwatch_service_known "$svc"; then
+        warn "Logwatch: salto servizio non supportato in config: ${svc}"
+        continue
+      fi
       if [[ "$svc" == -* ]]; then
         echo "Service = \"${svc}\"" >> "$conf"
       else
@@ -735,6 +771,11 @@ verify_logwatch_config() {
   err="$(logwatch --output stdout --range Today --detail Low 2>&1)" || true
   if echo "$err" | grep -qi 'Wrong configuration entry for "Service"'; then
     die "Config Logwatch non valida (Service). Verifica /etc/logwatch/conf/logwatch.conf — non mischiare All con servizi specifici; il default in /usr/share/logwatch/default.conf/ imposta All."
+  fi
+  if echo "$err" | grep -qi 'does not know how to process service'; then
+    local bad
+    bad="$(echo "$err" | grep -oi 'process service: [^[:space:]]*' | head -1 | sed 's/.*: //')"
+    die "Logwatch non supporta il servizio '${bad:-?}' su questo sistema. Riesegui: MODULE_FORCE=yes bash install.sh --only logwatch --skip base -y — oppure rimuovi la riga da /etc/logwatch/conf/logwatch.conf"
   fi
   if echo "$err" | grep -qi 'error'; then
     warn "Logwatch segnala: $(echo "$err" | head -3 | tr '\n' ' ')"

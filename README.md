@@ -2,7 +2,7 @@
 
 **Debian server provisioning in a single file.**
 
-> **The Provisioner** · `install.sh` v1.6.3  
+> **The Provisioner** · `install.sh` v1.6.4  
 > **Author:** [Carlo Savino](https://github.com/slash3rmast3r) — [info@savinocarlo.it](mailto:info@savinocarlo.it) — [www.savinocarlo.it](https://www.savinocarlo.it)  
 > **License:** [BSD 3-Clause](LICENSE) — free to use; keep copyright and license text
 
@@ -41,6 +41,11 @@ Lo script legge `/etc/os-release` e `/etc/debian_version`, imposta un profilo pe
 | 11 | Bullseye | Supportato |
 | ≤ 10 | Buster e precedenti | Bloccato (override: `DEBIAN_ALLOW_OLD=yes`) |
 
+
+## Novità v1.6.4
+
+- **Logwatch** — esclude servizi non supportati dal pacchetto Debian (es. `proftpd`, `docker` se manca lo script in `/usr/share/logwatch/scripts/services/`)
+- **Validazione** — errore chiaro se la config contiene un servizio sconosciuto a Logwatch
 
 ## Novità v1.6.3
 
@@ -195,6 +200,8 @@ Dopo l'installazione: password con `passwd PROFTPD_USER` (o prompt a fine modulo
 | `sshd,postfix,...` | Una riga `Service =` per ogni servizio nel file generato |
 
 **Nota:** Logwatch unisce `/usr/share/logwatch/default.conf/` (default `Service = All`) con `/etc/logwatch/conf/logwatch.conf`. Per servizi specifici lo script scrive prima `Service = ""` per resettare All, poi una riga per servizio. Non mischiare All con servizi named.
+**ProFTPd:** il pacchetto `logwatch` Debian **non include** un filtro `proftpd` — Monit lo monitora, Logwatch no (salvo script custom in `/etc/logwatch/scripts/services/`).
+
 
 File override corretto: **`/etc/logwatch/conf/logwatch.conf`** (non `/usr/share/...`, quello è solo il template Debian).
 
@@ -211,7 +218,7 @@ sudo rm -f /etc/logwatch/conf/logwatch.conf.d/*.conf
 logwatch --output stdout --range Today --detail Low | head
 ```
 
-Oppure con lo script v1.6.3+:
+Oppure con lo script v1.6.4+:
 
 ```bash
 sudo MODULE_FORCE=yes bash install.sh --only logwatch --skip base -y
