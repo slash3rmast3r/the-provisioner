@@ -36,13 +36,13 @@ if grep -q $'\r' "$0" 2>/dev/null; then
   sed -i 's/\r$//' "$0"
   exec /usr/bin/env bash "$0" "$@"
 fi
-echo "[install.sh] debian-provision v1.6.2 — avvio..." >&2
+echo "[install.sh] debian-provision v1.6.3 — avvio..." >&2
 
 # Nota: NON usare set -e — con pattern [[ cond ]] && cmd le funzioni
 # restituiscono exit 1 quando la condizione è falsa e lo script termina in silenzio.
 set -uo pipefail
 
-VERSION="1.6.2"
+VERSION="1.6.3"
 PROVISIONER_AUTHOR="Carlo Savino"
 PROVISIONER_EMAIL="info@savinocarlo.it"
 PROVISIONER_WEBSITE="www.savinocarlo.it"
@@ -463,6 +463,27 @@ load_config_file() {
   set +a
 }
 
+load_provisioner_state() {
+  [[ -n "$CONFIG_FILE" ]] && return 0
+  local runtime="${MARKER_DIR}/runtime.env"
+  [[ -f "$runtime" ]] || return 0
+  info "Stato precedente: ${runtime} (solo variabili ancora 'auto')"
+  local v line key val
+  for v in INSTALL_BUILD INSTALL_UFW INSTALL_SMTP INSTALL_DOCKER INSTALL_MONIT INSTALL_LOGWATCH \
+           INSTALL_CRON INSTALL_RAM_MONITOR INSTALL_SMART_MONITOR INSTALL_BOOT_SERVICES \
+           INSTALL_PROFTPD INSTALL_FAIL2BAN INSTALL_SSH_HARDENING INSTALL_TIMEZONE; do
+    [[ "${!v}" != "auto" ]] && continue
+    line="$(grep -E "^${v}=" "$runtime" 2>/dev/null | tail -1 || true)"
+    [[ -z "$line" ]] && continue
+    val="${line#*=}"
+    [[ -n "$val" ]] && printf -v "$v" '%s' "$val"
+  done
+  if [[ -n "$ONLY_MODULES" ]]; then
+    line="$(grep -E '^UFW_SSH_PORT=' "$runtime" 2>/dev/null | tail -1 || true)"
+    [[ -n "$line" ]] && UFW_SSH_PORT="${line#*=}"
+  fi
+}
+
 load_smtp_password() {
   if [[ -n "${SMTP_PASSWORD_FILE:-}" && -f "$SMTP_PASSWORD_FILE" ]]; then
     SMTP_PASSWORD="$(tr -d '\n\r' < "$SMTP_PASSWORD_FILE")"
@@ -524,37 +545,132 @@ preflight_checks() {
   fi
 }
 
+# ─── Rilevamento servizi Monit / Logwatch (auto a cascata) ─────────────────────
+
+dpkg_installed() {
+  dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'
+}
+
+systemd_unit_exists() {
+  local unit="$1"
+  [[ "$unit" == *.service ]] || unit="${unit}.service"
+  systemctl cat "$unit" &>/dev/null
+}
+
+logwatch_script_exists() {
+  [[ -f "/usr/share/logwatch/scripts/services/$1" ]]
+}
+
+monitoring_component_active() {
+  local install_var="$1" module="$2" os_fn="$3"
+  [[ -n "$install_var" ]] && is_yes "${!install_var}" && return 0
+  [[ -n "$module" ]] && is_module_done "$module" && return 0
+  [[ -n "$os_fn" ]] && "$os_fn" && return 0
+  return 1
+}
+
+os_has_ssh() {
+  systemd_unit_exists ssh || systemd_unit_exists sshd || dpkg_installed openssh-server
+}
+
+os_has_postfix() {
+  systemd_unit_exists postfix || dpkg_installed postfix
+}
+
+os_has_docker() {
+  systemd_unit_exists docker || dpkg_installed docker-ce || dpkg_installed docker.io
+}
+
+os_has_proftpd() {
+  systemd_unit_exists proftpd || dpkg_installed proftpd-basic || dpkg_installed proftpd-core || dpkg_installed proftpd
+}
+
+os_has_fail2ban() {
+  systemd_unit_exists fail2ban || dpkg_installed fail2ban
+}
+
+os_has_monit() {
+  systemd_unit_exists monit || dpkg_installed monit
+}
+
+os_has_nginx() {
+  systemd_unit_exists nginx || dpkg_installed nginx
+}
+
+add_unique_csv_item() {
+  local -n _arr=$1
+  local item="$2" x
+  for x in "${_arr[@]}"; do
+    [[ "$x" == "$item" ]] && return 0
+  done
+  _arr+=("$item")
+}
+
 build_monit_services() {
   local services=()
-  is_yes "$INSTALL_UFW"        && services+=("ssh")
-  is_yes "$INSTALL_DOCKER"     && services+=("docker")
-  is_yes "$INSTALL_SMTP"       && services+=("postfix")
-  is_yes "$INSTALL_PROFTPD"    && services+=("proftpd")
-  services+=("filesystem")
+  if monitoring_component_active INSTALL_UFW ufw os_has_ssh; then
+    add_unique_csv_item services ssh
+  fi
+  if monitoring_component_active INSTALL_DOCKER docker os_has_docker; then
+    add_unique_csv_item services docker
+  fi
+  if monitoring_component_active INSTALL_SMTP smtp os_has_postfix; then
+    add_unique_csv_item services postfix
+  fi
+  if monitoring_component_active INSTALL_PROFTPD proftpd os_has_proftpd; then
+    add_unique_csv_item services proftpd
+  fi
+  if os_has_nginx; then
+    add_unique_csv_item services nginx
+  fi
+  add_unique_csv_item services filesystem
   (IFS=','; echo "${services[*]}")
 }
 
 build_logwatch_services() {
-  local services=("sshd")
-  is_yes "$INSTALL_SMTP"     && services+=("postfix")
-  is_yes "$INSTALL_FAIL2BAN" && services+=("fail2ban")
-  is_yes "$INSTALL_MONIT"    && services+=("monit")
-  is_yes "$INSTALL_PROFTPD"  && services+=("proftpd")
-  is_yes "$INSTALL_DOCKER"   && services+=("docker")
+  local services=()
+  if os_has_ssh && { logwatch_script_exists sshd || logwatch_script_exists ssh; }; then
+    if logwatch_script_exists sshd; then
+      add_unique_csv_item services sshd
+    else
+      add_unique_csv_item services ssh
+    fi
+  elif logwatch_script_exists sshd; then
+    add_unique_csv_item services sshd
+  fi
+  if monitoring_component_active INSTALL_SMTP smtp os_has_postfix && logwatch_script_exists postfix; then
+    add_unique_csv_item services postfix
+  fi
+  if monitoring_component_active INSTALL_FAIL2BAN fail2ban os_has_fail2ban && logwatch_script_exists fail2ban; then
+    add_unique_csv_item services fail2ban
+  fi
+  if monitoring_component_active INSTALL_MONIT monit os_has_monit && logwatch_script_exists monit; then
+    add_unique_csv_item services monit
+  fi
+  if monitoring_component_active INSTALL_PROFTPD proftpd os_has_proftpd && logwatch_script_exists proftpd; then
+    add_unique_csv_item services proftpd
+  fi
+  if monitoring_component_active INSTALL_DOCKER docker os_has_docker && logwatch_script_exists docker; then
+    add_unique_csv_item services docker
+  fi
+  if os_has_nginx && logwatch_script_exists nginx; then
+    add_unique_csv_item services nginx
+  fi
+  ((${#services[@]} == 0)) && services=(sshd)
   (IFS=','; echo "${services[*]}")
 }
 
 resolve_monit_services() {
   if [[ "${MONIT_SERVICES,,}" == "auto" || -z "$MONIT_SERVICES" ]]; then
     MONIT_SERVICES="$(build_monit_services)"
-    info "Monit servizi (auto): ${MONIT_SERVICES}"
+    info "Monit servizi (auto: install/marker/OS): ${MONIT_SERVICES}"
   fi
 }
 
 resolve_logwatch_services() {
   if [[ "${LOGWATCH_SERVICES,,}" == "auto" || -z "$LOGWATCH_SERVICES" ]]; then
     LOGWATCH_SERVICES="$(build_logwatch_services)"
-    info "Logwatch servizi (auto): ${LOGWATCH_SERVICES}"
+    info "Logwatch servizi (auto: install/marker/OS): ${LOGWATCH_SERVICES}"
   fi
   normalize_logwatch_services
 }
@@ -771,7 +887,8 @@ ${BOLD}VARIABILI (esempio):${NC}
   SYSTEM_TIMEZONE, SSH_PERMIT_ROOT, SSH_PASSWORD_AUTH, SSH_ALLOW_USERS
   PROFTPD_PORT, PROFTPD_TLS, PROFTPD_USER, PROFTPD_PASSIVE_MIN, PROFTPD_PASSIVE_MAX
   PROFTPD_CHROOT, PROFTPD_MAX_CLIENTS, PROFTPD_MAX_INSTANCES
-  LOGWATCH_SERVICES (auto, All, oppure sshd,postfix,... — una riga Service per servizio)
+  LOGWATCH_SERVICES (auto — install/marker/OS, All, oppure sshd,postfix,... — una riga Service per servizio)
+  MONIT_SERVICES (auto — install/marker/OS, oppure ssh,docker,postfix,...)
   ALLOW_REBOOT (yes/no/auto) — riavvio a fine provisioning
   SEND_INSTALL_REPORT (yes/no/auto) — email report finale (default: auto)
   INSTALL_REPORT_EMAIL — destinatario report (default: Monit/Logwatch/SMTP_FROM)
@@ -805,6 +922,7 @@ parse_args() {
     esac
   done
   load_config_file
+  load_provisioner_state
 }
 
 # ─── APT / sistema base ───────────────────────────────────────────────────────

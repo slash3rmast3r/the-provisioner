@@ -22,5 +22,5 @@ jobs:
 
       - name: Verify version in header
         run: |
-          grep -q 'VERSION="1.6.2"' install.sh
-          grep -q 'v1.6.2' install.sh
+          grep -q 'VERSION="1.6.3"' install.sh
+          grep -q 'v1.6.3' install.sh

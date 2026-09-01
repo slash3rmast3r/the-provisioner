@@ -2,7 +2,7 @@
 
 **Debian server provisioning in a single file.**
 
-> **The Provisioner** · `install.sh` v1.6.2  
+> **The Provisioner** · `install.sh` v1.6.3  
 > **Author:** [Carlo Savino](https://github.com/slash3rmast3r) — [info@savinocarlo.it](mailto:info@savinocarlo.it) — [www.savinocarlo.it](https://www.savinocarlo.it)  
 > **License:** [BSD 3-Clause](LICENSE) — free to use; keep copyright and license text
 
@@ -41,6 +41,12 @@ Lo script legge `/etc/os-release` e `/etc/debian_version`, imposta un profilo pe
 | 11 | Bullseye | Supportato |
 | ≤ 10 | Buster e precedenti | Bloccato (override: `DEBIAN_ALLOW_OLD=yes`) |
 
+
+## Novità v1.6.3
+
+- **Monit/Logwatch `auto`** — rilevamento a cascata: flag `INSTALL_*` → marker `/etc/debian-provision/*.done` → introspezione OS (`systemctl`/`dpkg`) + script Logwatch disponibili
+- **`runtime.env`** — ricaricato automaticamente su `--only` (solo variabili ancora `auto`), senza `CONFIG_FILE` esplicito
+- **Nginx** — incluso in auto se installato sul server (Monit + Logwatch)
 
 ## Novità v1.6.2
 
@@ -184,7 +190,7 @@ Dopo l'installazione: password con `passwd PROFTPD_USER` (o prompt a fine modulo
 
 | `LOGWATCH_SERVICES` | Comportamento |
 |---------------------|---------------|
-| `auto` | Lista derivata dai componenti installati |
+| `auto` | Cascata: componenti scelti → marker `.done` → servizi rilevati su OS |
 | `All` | Tutti i log (solo esclusioni `-nome` ammesse oltre ad All) |
 | `sshd,postfix,...` | Una riga `Service =` per ogni servizio nel file generato |
 
@@ -205,7 +211,7 @@ sudo rm -f /etc/logwatch/conf/logwatch.conf.d/*.conf
 logwatch --output stdout --range Today --detail Low | head
 ```
 
-Oppure con lo script v1.6.2+:
+Oppure con lo script v1.6.3+:
 
 ```bash
 sudo MODULE_FORCE=yes bash install.sh --only logwatch --skip base -y
@@ -264,7 +270,7 @@ Moduli `--only`: `base`, `build`, `smtp`, `ufw`, `ssh_hardening`, `fail2ban`, `d
 | `MODULE_FORCE` | `yes` — riesegui moduli già completati |
 | `PREFLIGHT_STRICT` | `yes` (default) — blocca su disco/RAM/DNS insufficienti |
 | `CLOUD_PROVIDER` | `auto`, `aws`, `lightsail`, `hetzner`, `ovh` |
-| `MONIT_SERVICES` | `auto` (default) o lista virgola |
+| `MONIT_SERVICES` | `auto` (install/marker/OS) o lista virgola (`ssh`, `postfix`, `docker`, `nginx`, …) |
 | `LOGWATCH_SERVICES` | `auto`, `All`, oppure `sshd,postfix,...` |
 | `SYSTEM_TIMEZONE` | Timezone IANA (default prompt: `Europe/Rome`) |
 
