@@ -2,7 +2,7 @@
 
 **Debian server provisioning in a single file.**
 
-> **The Provisioner** · `install.sh` v1.6.1  
+> **The Provisioner** · `install.sh` v1.6.2  
 > **Author:** [Carlo Savino](https://github.com/slash3rmast3r) — [info@savinocarlo.it](mailto:info@savinocarlo.it) — [www.savinocarlo.it](https://www.savinocarlo.it)  
 > **License:** [BSD 3-Clause](LICENSE) — free to use; keep copyright and license text
 
@@ -42,10 +42,17 @@ Lo script legge `/etc/os-release` e `/etc/debian_version`, imposta un profilo pe
 | ≤ 10 | Buster e precedenti | Bloccato (override: `DEBIAN_ALLOW_OLD=yes`) |
 
 
+## Novità v1.6.2
+
+- **Logwatch (fix definitivo)** — `Service = ""` in `/etc/logwatch/conf/logwatch.conf` resetta `Service = All` ereditato da `/usr/share/logwatch/default.conf/`
+- **`--only`** — salta la selezione componenti (Fase 2); esegue solo i moduli indicati
+- **Banner versione** — `/etc/os-release` non sovrascrive più la versione script (su Trixie non compare più `v13`)
+
 ## Novità v1.6.1
 
 - **Logwatch fix** — servizi scritti come righe `Service = nome` separate (non virgola su una riga); rimossi fragment Debian in conflitto; validazione config a fine modulo
 - **ProFTPd** — prompt esteso: chroot home, max client/istanze, riepilogo, opzione `passwd` interattivo
+
 ## Novità v1.6.0
 
 - **Preflight** — spazio disco, RAM, DNS, avvisi systemd/SSH
@@ -181,18 +188,27 @@ Dopo l'installazione: password con `passwd PROFTPD_USER` (o prompt a fine modulo
 | `All` | Tutti i log (solo esclusioni `-nome` ammesse oltre ad All) |
 | `sshd,postfix,...` | Una riga `Service =` per ogni servizio nel file generato |
 
-**Nota:** non usare `Service = All` insieme ad altri servizi nella stessa config — Logwatch restituisce errore. Lo script v1.6.1+ gestisce il formato correttamente.
+**Nota:** Logwatch unisce `/usr/share/logwatch/default.conf/` (default `Service = All`) con `/etc/logwatch/conf/logwatch.conf`. Per servizi specifici lo script scrive prima `Service = ""` per resettare All, poi una riga per servizio. Non mischiare All con servizi named.
+
+File override corretto: **`/etc/logwatch/conf/logwatch.conf`** (non `/usr/share/...`, quello è solo il template Debian).
 
 ### Fix manuale su server già provisionato
 
 ```bash
 sudo nano /etc/logwatch/conf/logwatch.conf
-# Sostituisci: Service = sshd,postfix,...
-# Con righe separate:
+# Reset All (default in /usr/share/logwatch/default.conf/) poi i servizi:
+# Service = ""
 # Service = sshd
-# Service = postfix
+# Service = fail2ban
+# Service = monit
 sudo rm -f /etc/logwatch/conf/logwatch.conf.d/*.conf
 logwatch --output stdout --range Today --detail Low | head
+```
+
+Oppure con lo script v1.6.2+:
+
+```bash
+sudo MODULE_FORCE=yes bash install.sh --only logwatch --skip base -y
 ```
 
 ## Riavvio
@@ -252,6 +268,53 @@ Moduli `--only`: `base`, `build`, `smtp`, `ufw`, `ssh_hardening`, `fail2ban`, `d
 | `LOGWATCH_SERVICES` | `auto`, `All`, oppure `sshd,postfix,...` |
 | `SYSTEM_TIMEZONE` | Timezone IANA (default prompt: `Europe/Rome`) |
 
+
+## Riconfigurare moduli
+
+Con --only lo script **salta la selezione componenti** (Fase 2) e va diretto ai moduli richiesti (da v1.6.2).
+
+Per **reinstallare o riconfigurare** uno o più moduli già completati:
+
+```bash
+sudo MODULE_FORCE=yes bash install.sh --only NOME_MODULO --skip base -y
+```
+
+| Flag | Significato |
+|------|-------------|
+| `MODULE_FORCE=yes` | Ignora i marker `/etc/debian-provision/*.done` |
+| `--only LIST` | Esegue solo i moduli indicati (virgola) |
+| `--skip base` | Salta `apt update/upgrade` |
+| `-y` | Salta la conferma iniziale |
+
+### Esempi
+
+**Logwatch** (fix config servizi):
+```bash
+sudo MODULE_FORCE=yes bash install.sh --only logwatch --skip base -y
+```
+
+**ProFTPd + timezone**:
+```bash
+sudo MODULE_FORCE=yes bash install.sh --only proftpd,timezone --skip base -y
+```
+
+**Non interattivo** (ProFTPd + timezone):
+```bash
+sudo MODULE_FORCE=yes \
+  SYSTEM_TIMEZONE=Europe/Rome \
+  PROFTPD_USER=ftpuser \
+  PROFTPD_TLS=yes \
+  PROFTPD_CHROOT=yes \
+  bash install.sh --only proftpd,timezone --skip base --non-interactive -y
+```
+
+Alternativa: rimuovi il marker e rilancia senza `MODULE_FORCE`:
+```bash
+sudo rm -f /etc/debian-provision/logwatch.done
+sudo bash install.sh --only logwatch --skip base -y
+```
+
+Moduli con dipendenze: `logwatch` e `monit` richiedono Postfix già configurato.
 ## Sviluppo e CI
 
 ```bash

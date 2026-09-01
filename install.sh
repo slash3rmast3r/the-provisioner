@@ -36,13 +36,13 @@ if grep -q $'\r' "$0" 2>/dev/null; then
   sed -i 's/\r$//' "$0"
   exec /usr/bin/env bash "$0" "$@"
 fi
-echo "[install.sh] debian-provision v1.6.1 — avvio..." >&2
+echo "[install.sh] debian-provision v1.6.2 — avvio..." >&2
 
 # Nota: NON usare set -e — con pattern [[ cond ]] && cmd le funzioni
 # restituiscono exit 1 quando la condizione è falsa e lo script termina in silenzio.
 set -uo pipefail
 
-VERSION="1.6.1"
+VERSION="1.6.2"
 PROVISIONER_AUTHOR="Carlo Savino"
 PROVISIONER_EMAIL="info@savinocarlo.it"
 PROVISIONER_WEBSITE="www.savinocarlo.it"
@@ -241,11 +241,13 @@ detect_debian_release() {
   [[ -f /etc/debian_version ]] || die "Supportato solo Debian."
   [[ -f /etc/os-release ]]     || die "File /etc/os-release mancante."
 
-  local id version_id codename debian_version
+  local id version_id codename debian_version script_version
+  script_version="$VERSION"
   set +u
   # shellcheck source=/dev/null
   . /etc/os-release
   set -u
+  VERSION="$script_version"
 
   id="${ID:-}"
   [[ "${id,,}" == "debian" ]] || \
@@ -591,7 +593,11 @@ EOF
 
   if logwatch_wants_all || [[ "$LOGWATCH_SERVICES" == "All" ]]; then
     echo "Service = All" >> "$conf"
+    echo 'Service = "-zz-network"' >> "$conf"
+    echo 'Service = "-zz-sys"' >> "$conf"
   else
+    # Reset Service = All ereditato da /usr/share/logwatch/default.conf/logwatch.conf
+    echo 'Service = ""' >> "$conf"
     local svc
     IFS=',' read -ra _lw_arr <<< "$LOGWATCH_SERVICES"
     for svc in "${_lw_arr[@]}"; do
@@ -612,7 +618,7 @@ verify_logwatch_config() {
   local err
   err="$(logwatch --output stdout --range Today --detail Low 2>&1)" || true
   if echo "$err" | grep -qi 'Wrong configuration entry for "Service"'; then
-    die "Config Logwatch non valida (Service). File: /etc/logwatch/conf/logwatch.conf"
+    die "Config Logwatch non valida (Service). Verifica /etc/logwatch/conf/logwatch.conf — non mischiare All con servizi specifici; il default in /usr/share/logwatch/default.conf/ imposta All."
   fi
   if echo "$err" | grep -qi 'error'; then
     warn "Logwatch segnala: $(echo "$err" | head -3 | tr '\n' ' ')"
@@ -2336,7 +2342,10 @@ main() {
   mkdir -p "$(dirname "$LOG_FILE")" "$MARKER_DIR"
   touch "$LOG_FILE"
 
-  if [[ "$INTERACTIVE" == "yes" ]]; then
+  if [[ -n "$ONLY_MODULES" ]]; then
+    info "Modalità --only: ${ONLY_MODULES} (MODULE_FORCE=${MODULE_FORCE})"
+    show_banner
+  elif [[ "$INTERACTIVE" == "yes" ]]; then
     collect_component_selection
   else
     resolve_auto_selection_noninteractive
@@ -2395,14 +2404,22 @@ main() {
   info "━━━ Cron ━━━"
   module_cron
 
-  if is_yes "$INSTALL_MONIT" || is_yes "$INSTALL_LOGWATCH"; then
+  local prompt_mail=false
+  is_yes "$INSTALL_MONIT" && prompt_mail=true
+  is_yes "$INSTALL_LOGWATCH" && prompt_mail=true
+  [[ -n "$ONLY_MODULES" ]] && list_contains "$ONLY_MODULES" "monit" && prompt_mail=true
+  [[ -n "$ONLY_MODULES" ]] && list_contains "$ONLY_MODULES" "logwatch" && prompt_mail=true
+
+  if $prompt_mail; then
     if ! smtp_is_configured; then
       prompt_notifications_mail
     else
       prompt_var SMTP_FROM "Email mittente (From)" "${SMTP_FROM:-$SMTP_USER}"
       [[ -z "${MONIT_ADMIN_EMAIL:-}" ]] && prompt_var MONIT_ADMIN_EMAIL "Email alert" "${SMTP_FROM:-root@localhost}"
-      [[ -z "${LOGWATCH_EMAIL:-}" ]] && is_yes "$INSTALL_LOGWATCH" && \
-        prompt_var LOGWATCH_EMAIL "Email Logwatch" "${MONIT_ADMIN_EMAIL:-root@localhost}"
+      if is_yes "$INSTALL_LOGWATCH" || list_contains "${ONLY_MODULES:-}" "logwatch"; then
+        [[ -z "${LOGWATCH_EMAIL:-}" ]] && \
+          prompt_var LOGWATCH_EMAIL "Email Logwatch" "${MONIT_ADMIN_EMAIL:-root@localhost}"
+      fi
     fi
   fi
 
